@@ -281,16 +281,134 @@ export function buildServer(manager: SessionManager): McpServer {
   );
 
   server.registerTool(
+    'click_ui',
+    {
+      title: 'Click UI outside the passage',
+      description:
+        'Click dialogs, sidebar buttons and menus (SAVES, OPTIONS, ModLoader banner, modal buttons) by ref, CSS selector or visible text. ' +
+        'Returns the new observation. Use choose() for passage choices instead.',
+      inputSchema: {
+        game_id: gameId,
+        ref: z.string().optional().describe('UI ref from an observation (e.g. "u1" or "x3").'),
+        text: z.string().optional().describe('Visible text of the target (case-insensitive, partial match; the shortest match wins).'),
+        selector: z.string().optional().describe('CSS selector, if you know the exact element.'),
+        exact: z.boolean().optional().describe('Require an exact text match (default false).')
+      }
+    },
+    async ({ game_id, ref, text: uiText, selector, exact }) => {
+      try {
+        const session = manager.get(game_id);
+        if (!ref && !uiText && !selector) return errorText('missing-argument', 'Provide ref, text or selector.');
+        const res = await manager.clickUi(session, { ref, text: uiText, selector, exact });
+        if (!res.ok) {
+          return text(`ERROR: ${res.error}${res.message ? ` — ${res.message}` : ''}\n\n` + observationText(session, res.observation!, false, null), true);
+        }
+        const note = `Clicked UI: ${res.label ?? '(element)'}${res.matches && res.matches > 1 ? ` (${res.matches} matches; alternatives: ${(res.alternatives ?? []).slice(0, 4).join(' | ')})` : ''}`;
+        return text(note + '\n\n' + observationText(session, res.observation!, false, null));
+      } catch (err) {
+        return errorText('click-ui-failed', String((err as Error)?.message ?? err));
+      }
+    }
+  );
+
+  server.registerTool(
+    'upload_file',
+    {
+      title: 'Upload a file into the game',
+      description:
+        'Upload a local file (mod .zip, exported .save, image) into an <input type=file> in the game. ' +
+        'Provide trigger_text/trigger_ref for buttons that open a picker ("Load from File…", "Import"), or let it target the file input directly.',
+      inputSchema: {
+        game_id: gameId,
+        path: z.string().describe('Absolute path of the file on the machine running this MCP server.'),
+        trigger_text: z.string().optional().describe('Visible text of the button that opens the file picker.'),
+        trigger_ref: z.string().optional().describe('Ref of the trigger button (alternative to trigger_text).'),
+        trigger_selector: z.string().optional().describe('CSS selector of the trigger button (e.g. "#saves-import").'),
+        selector: z.string().optional().describe('CSS selector of an <input type=file> (used when no trigger is given).'),
+        ref: z.string().optional().describe('Ref of a file input from inspect_ui (alternative to selector).')
+      }
+    },
+    async ({ game_id, path, trigger_text, trigger_ref, trigger_selector, selector, ref }) => {
+      try {
+        const session = manager.get(game_id);
+        const res = await manager.uploadFile(session, { path, ref, triggerText: trigger_text, triggerRef: trigger_ref, triggerSelector: trigger_selector, selector });
+        if (!res.ok) {
+          return text(`ERROR: ${res.error}${res.message ? ` — ${res.message}` : ''}\n\n` + observationText(session, res.observation!, false, null), true);
+        }
+        return text(`Uploaded "${path}".\n\n` + observationText(session, res.observation!, false, null));
+      } catch (err) {
+        return errorText('upload-failed', String((err as Error)?.message ?? err));
+      }
+    }
+  );
+
+  server.registerTool(
+    'inspect_ui',
+    {
+      title: 'Inspect a UI panel',
+      description:
+        'Inspect DOM outside the passage. Pass a CSS selector to get its text, buttons (with refs usable in click_ui) and inputs (file inputs usable in upload_file). ' +
+        'Without a selector, lists overlay panels (mod GUIs, dev panels) that contain buttons or file inputs.',
+      inputSchema: {
+        game_id: gameId,
+        selector: z.string().optional().describe('CSS selector of the panel to inspect; omit to discover overlay panels.')
+      }
+    },
+    async ({ game_id, selector }) => {
+      try {
+        const session = manager.get(game_id);
+        const res = await manager.inspectUi(session, selector);
+        if (!res.ok) return errorText(res.error ?? 'inspect-failed', res.message);
+        if (!selector) {
+          const cands = (res.candidates ?? []) as Array<Record<string, unknown>>;
+          if (!cands.length) return text('No overlay panels discovered. Pass a CSS selector to inspect a specific element.');
+          return text(
+            'Panels:\n' +
+              cands
+                .map(
+                  (c, i) =>
+                    `${i + 1}. ${c.frame ? '[iframe] ' : ''}${c.selector} — ${c.buttons} buttons, ${c.inputs} inputs, ${c.fileInputs} file inputs: ${String(c.text ?? '').slice(0, 90)}`
+                )
+                .join('\n') +
+              '\n\nTip: upload_file without a selector searches all frames for a file input; click_ui by text also works inside iframes.'
+          );
+        }
+        const lines = [`# ${res.selector}${res.frame ? ' (iframe)' : ''}`, res.text ?? ''];
+        if (res.buttons?.length) {
+          lines.push('', 'Buttons:');
+          res.buttons.forEach((b, i) => lines.push(`  ${i + 1}. ${b.label}${b.ref ? ` [${b.ref}]` : ' (use click_ui text)'}`));
+        }
+        if (res.inputs?.length) {
+          lines.push('', 'Inputs:');
+          for (const inp of res.inputs) {
+            lines.push(
+              `  ${inp.ref || '(file input — use upload_file)'} ${inp.kind}${inp.name ? ` name="${inp.name}"` : ''}${inp.value ? ` value="${String(inp.value).slice(0, 40)}"` : ''}` +
+                (inp.checked !== undefined ? ` checked=${inp.checked}` : '')
+            );
+          }
+        }
+        return text(lines.join('\n'));
+      } catch (err) {
+        return errorText('inspect-ui-failed', String((err as Error)?.message ?? err));
+      }
+    }
+  );
+
+  server.registerTool(
     'screenshot',
     {
       title: 'Screenshot the game',
-      description: 'Take a PNG screenshot of the game viewport. Useful for canvas/image-driven games and visual QA.',
-      inputSchema: { game_id: gameId }
+      description: 'Take a PNG screenshot of the game viewport. Useful for canvas/image-driven games and visual QA. Pass path to save it to a file (returns the path instead of the image).',
+      inputSchema: {
+        game_id: gameId,
+        path: z.string().optional().describe('Optional output file path; when set, the PNG is written there and only the path is returned.')
+      }
     },
-    async ({ game_id }) => {
+    async ({ game_id, path }) => {
       try {
         const session = manager.get(game_id);
-        const buf = await manager.screenshot(session);
+        const buf = await manager.screenshot(session, path);
+        if (path) return text(`Screenshot saved: ${path} (${buf.length} bytes)`);
         return { content: [{ type: 'image' as const, data: buf.toString('base64'), mimeType: 'image/png' }] };
       } catch (err) {
         return errorText('screenshot-failed', String((err as Error)?.message ?? err));

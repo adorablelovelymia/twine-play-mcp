@@ -8,7 +8,7 @@
     "twine-play-mcp": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && cp -r src/bridge dist/bridge",
+    "build": "tsc -p tsconfig.json && mkdir -p dist/bridge && cp src/bridge/bridge.js dist/bridge/bridge.js",
     "dev": "tsx src/index.ts",
     "spike": "tsx scripts/spike.ts",
     "formats": "tsx scripts/formats.ts",

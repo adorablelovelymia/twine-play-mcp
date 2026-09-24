@@ -1,5 +1,6 @@
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
+import { chromium, type Browser, type BrowserContext, type Frame, type Page } from 'playwright-core';
 import fs from 'node:fs';
+import path from 'node:path';
 import crypto from 'node:crypto';
 import { serveGame, type GameServer } from './static-server.js';
 
@@ -11,6 +12,7 @@ export interface ChoiceInfo {
   href: string | null;
   disabled: boolean;
   external: boolean;
+  dialog?: boolean;
 }
 
 export interface InputInfo {
@@ -21,6 +23,20 @@ export interface InputInfo {
   value: string | null;
   options?: Array<{ value: string; label: string }>;
   disabled: boolean;
+  checked?: boolean;
+  dialog?: boolean;
+}
+
+export interface UiButton {
+  ref: string;
+  label: string;
+  kind: string;
+}
+
+export interface DialogInfo {
+  title: string | null;
+  text: string;
+  buttons: number;
 }
 
 export interface Observation {
@@ -34,6 +50,8 @@ export interface Observation {
   text: string;
   choices: ChoiceInfo[];
   inputs: InputInfo[];
+  ui: UiButton[];
+  dialog: DialogInfo | null;
   status: string | null;
   variables: unknown;
   engineState: string | null;
@@ -396,8 +414,13 @@ export class SessionManager {
       return { ok: false, error: 'stale-ref', message: `Ref ${ref} is gone; call observe again.`, observation: await this.observe(session) };
     }
     const tag = await locator.first().evaluate((el) => el.tagName.toLowerCase()).catch(() => '');
+    const inputType = await locator.first().getAttribute('type').catch(() => null);
     try {
-      if (tag === 'select') {
+      if (inputType === 'checkbox' || inputType === 'radio') {
+        const desired = value === undefined ? true : /^(true|1|yes|on|check|checked)$/i.test(String(value).trim());
+        if (desired) await locator.first().check({ timeout: 2000 });
+        else await locator.first().uncheck({ timeout: 2000 });
+      } else if (tag === 'select') {
         await locator.first().selectOption({ label: value ?? '' }).catch(async () => {
           await locator.first().selectOption(value ?? '');
         });
@@ -426,6 +449,254 @@ export class SessionManager {
     return { ok: true, observation };
   }
 
+  /** Resolve a target inside one frame using that frame's injected bridge (fast, value-aware). */
+  private async resolveInFrame(
+    frame: Frame,
+    q: { selector?: string; text?: string; exact?: boolean }
+  ): Promise<{ ref: string; label?: string; matches?: number; alternatives?: string[] } | null> {
+    try {
+      const res = (await frame.evaluate((arg) => {
+        const api = (window as unknown as { __twineMCP?: { resolveUi?: (o: unknown) => unknown } }).__twineMCP;
+        if (!api || typeof api.resolveUi !== 'function') return { ok: false, error: 'bridge-missing' };
+        return api.resolveUi(arg);
+      }, q)) as { ok?: boolean; ref?: string; label?: string; matches?: number; alternatives?: string[] };
+      if (res && res.ok && res.ref) return { ref: res.ref, label: res.label, matches: res.matches, alternatives: res.alternatives };
+    } catch {
+      /* frame may be detached or cross-origin */
+    }
+    return null;
+  }
+
+  /** Resolve a target by CSS selector or visible text across the main frame and all child frames. */
+  private async resolveAcrossFrames(
+    session: GameSession,
+    q: { selector?: string; text?: string; exact?: boolean }
+  ): Promise<{ frame: Frame; ref: string; label: string; matches: number; alternatives?: string[] } | null> {
+    const main = session.page.mainFrame();
+    const frames: Frame[] = [main, ...session.page.frames().filter((f) => f !== main)];
+    for (const frame of frames) {
+      const hit = await this.resolveInFrame(frame, q);
+      if (hit) {
+        return { frame, ref: hit.ref, label: hit.label ?? '', matches: hit.matches ?? 1, alternatives: hit.alternatives };
+      }
+    }
+    return null;
+  }
+
+  /** Click a data-twmcp-ref element with Playwright, falling back to a DOM click. */
+  private async clickRefWithFallback(session: GameSession, ref: string): Promise<{ ok: boolean; method: string; message?: string }> {
+    try {
+      await session.page.locator(`[data-twmcp-ref="${ref}"]`).click({ timeout: 2500 });
+      return { ok: true, method: 'mouse' };
+    } catch {
+      const res = await this.bridge<BridgeResult>(session, 'clickRef', ref);
+      if (!res.ok) return { ok: false, method: 'js', message: res.message ?? res.error };
+      return { ok: true, method: 'js' };
+    }
+  }
+
+  /** Click UI outside the passage (dialogs, sidebar, menus, iframes) by ref, CSS selector or visible text. */
+  async clickUi(
+    session: GameSession,
+    target: { ref?: string; selector?: string; text?: string; exact?: boolean }
+  ): Promise<{ ok: boolean; error?: string; message?: string; label?: string; matches?: number; alternatives?: string[]; observation?: Observation }> {
+    // Fast path: JS-side resolution in the main frame. Essential on huge pages where
+    // Playwright's text engine is slow (100k+ DOM nodes).
+    const viaBridge = await this.bridge<BridgeResult & { ref?: string; label?: string; matches?: number; alternatives?: string[] }>(
+      session,
+      'resolveUi',
+      target
+    );
+    if (viaBridge.ok && viaBridge.ref) {
+      const clicked = await this.clickRefWithFallback(session, viaBridge.ref);
+      await this.waitStable(session);
+      if (!clicked.ok) {
+        return { ok: false, error: 'click-failed', message: clicked.message, observation: await this.observe(session) };
+      }
+      return {
+        ok: true,
+        label: viaBridge.label ? `${viaBridge.label} [${clicked.method}]` : clicked.method,
+        matches: viaBridge.matches,
+        alternatives: viaBridge.alternatives,
+        observation: await this.observe(session)
+      };
+    }
+
+    // Fallback: resolve inside child frames via their own injected bridge.
+    const hit = await this.resolveAcrossFrames(session, target);
+    if (!hit) {
+      return { ok: false, error: viaBridge.error ?? 'no-match', message: viaBridge.message ?? 'No element matched in any frame.', observation: await this.observe(session) };
+    }
+    const clicked = await this.clickRefInFrame(hit.frame, hit.ref);
+    if (!clicked.ok) {
+      return { ok: false, error: 'click-failed', message: clicked.message, observation: await this.observe(session) };
+    }
+    await this.waitStable(session);
+    const frameNote = hit.frame === session.page.mainFrame() ? '' : ' [iframe]';
+    return { ok: true, label: `${hit.label}${frameNote} [${clicked.method}]`, matches: hit.matches, alternatives: hit.alternatives, observation: await this.observe(session) };
+  }
+
+  /** Click a data-twmcp-ref inside a specific frame (Playwright first, DOM click fallback). */
+  private async clickRefInFrame(frame: Frame, ref: string): Promise<{ ok: boolean; method: string; message?: string }> {
+    try {
+      await frame.locator(`[data-twmcp-ref="${ref}"]`).click({ timeout: 2500 });
+      return { ok: true, method: 'mouse' };
+    } catch {
+      try {
+        const res = (await frame.evaluate((r) => {
+          const api = (window as unknown as { __twineMCP?: { clickRef?: (x: string) => unknown } }).__twineMCP;
+          if (!api || typeof api.clickRef !== 'function') return { ok: false, message: 'bridge-missing' };
+          return api.clickRef(r);
+        }, ref)) as { ok?: boolean; message?: string };
+        if (res && res.ok) return { ok: true, method: 'js' };
+        return { ok: false, method: 'js', message: res?.message };
+      } catch (err) {
+        return { ok: false, method: 'none', message: String((err as Error)?.message ?? err) };
+      }
+    }
+  }
+
+  /** Upload a local file into an <input type=file> (mods, save imports, …), optionally via a trigger button. */
+  async uploadFile(
+    session: GameSession,
+    opts: { path: string; ref?: string; selector?: string; triggerRef?: string; triggerText?: string; triggerSelector?: string }
+  ): Promise<{ ok: boolean; error?: string; message?: string; observation?: Observation }> {
+    const filePath = path.resolve(opts.path);
+    if (!fs.existsSync(filePath)) return { ok: false, error: 'file-not-found', message: filePath };
+
+    if (opts.triggerRef || opts.triggerText || opts.triggerSelector) {
+      const chooserPromise = session.page.waitForEvent('filechooser', { timeout: 4000 }).catch(() => null);
+      let clicked: { ok: boolean; error?: string; message?: string; observation?: Observation };
+      if (opts.triggerSelector) {
+        try {
+          await session.page.locator(opts.triggerSelector).first().click({ timeout: 3000 });
+          clicked = { ok: true };
+        } catch (err) {
+          clicked = { ok: false, error: 'click-failed', message: String((err as Error)?.message ?? err) };
+        }
+      } else {
+        clicked = await this.clickUi(session, { ref: opts.triggerRef, text: opts.triggerText });
+      }
+      if (!clicked.ok) return { ok: false, error: clicked.error, message: clicked.message, observation: clicked.observation };
+      const chooser = await chooserPromise;
+      if (chooser) {
+        await chooser.setFiles(filePath);
+        await this.waitStable(session);
+        return { ok: true, observation: await this.observe(session) };
+      }
+      // No native picker appeared — the click likely revealed a hidden <input type=file>; fall through.
+    }
+
+    const selector = opts.ref ? `[data-twmcp-ref="${opts.ref}"]` : opts.selector ?? 'input[type="file"]';
+    const main = session.page.mainFrame();
+    const frames: Frame[] = [main, ...session.page.frames().filter((f) => f !== main)];
+    let lastErr = '';
+    for (const frame of frames) {
+      const locators = frame.locator(selector);
+      const count = await locators.count().catch(() => 0);
+      if (!count) continue;
+      let target = -1;
+      for (let i = count - 1; i >= 0; i--) {
+        if (await locators.nth(i).isVisible().catch(() => false)) {
+          target = i;
+          break;
+        }
+      }
+      if (target < 0) target = count - 1;
+      try {
+        await locators.nth(target).setInputFiles(filePath);
+        await this.waitStable(session);
+        return { ok: true, observation: await this.observe(session) };
+      } catch (err) {
+        lastErr = String((err as Error)?.message ?? err);
+      }
+    }
+    return { ok: false, error: 'no-file-input', message: lastErr || `No file input matched ${selector}` };
+  }
+
+  /** Inspect an arbitrary UI subtree (mod GUI, backstage panel) or discover overlay panels. */
+  async inspectUi(
+    session: GameSession,
+    selector?: string
+  ): Promise<{
+    ok: boolean;
+    error?: string;
+    message?: string;
+    selector?: string;
+    text?: string;
+    frame?: boolean;
+    buttons?: Array<{ ref: string; label: string; kind: string }>;
+    inputs?: InputInfo[];
+    candidates?: unknown[];
+  }> {
+    const res = await this.bridge<BridgeResult & {
+      selector?: string;
+      text?: string;
+      buttons?: Array<{ ref: string; label: string; kind: string }>;
+      inputs?: InputInfo[];
+      candidates?: unknown[];
+    }>(session, 'inspectUi', { selector });
+
+    const main = session.page.mainFrame();
+    const childFrames = session.page.frames().filter((f) => f !== main);
+
+    if (!selector) {
+      const frameCandidates: Array<Record<string, unknown>> = [];
+      for (const frame of childFrames) {
+        try {
+          const info = (await frame.evaluate(`(() => ({
+            files: document.querySelectorAll('input[type=file]').length,
+            buttons: Array.from(document.querySelectorAll('button, a, [role=button]')).filter((e) => {
+              const r = e.getBoundingClientRect();
+              const s = getComputedStyle(e);
+              return r.width > 1 && r.height > 1 && s.display !== 'none' && s.visibility !== 'hidden';
+            }).length,
+            text: (() => {
+              const base = ((document.body && document.body.innerText) || '').replace(/\\s+/g, ' ');
+              const values = Array.from(document.querySelectorAll('textarea, input')).map((v) => v.value).filter((v) => v && v.length < 500).join(' | ');
+              return (values ? '⟦values: ' + values + '⟧ ' + base : base).slice(0, 400);
+            })()
+          }))()`)) as { files: number; buttons: number; text: string };
+          if (info.files || info.buttons) {
+            frameCandidates.push({
+              selector: `iframe(${frame.url().slice(0, 60) || 'about:blank'})`,
+              frame: true,
+              fileInputs: info.files,
+              buttons: info.buttons,
+              inputs: 0,
+              area: 0,
+              text: info.text
+            });
+          }
+        } catch {
+          /* frame may be gone */
+        }
+      }
+      frameCandidates.sort((a, b) => Number(b.fileInputs) - Number(a.fileInputs) || Number(b.buttons) - Number(a.buttons));
+      const base = res.ok ? (res.candidates ?? []) : [];
+      return { ok: true, candidates: [...frameCandidates, ...base] };
+    }
+
+    if (res.ok) return res;
+
+    // Selector not found in the main frame by the bridge: try the bridge inside each child frame.
+    for (const frame of childFrames) {
+      try {
+        const frameRes = (await frame.evaluate((sel) => {
+          const api = (window as unknown as { __twineMCP?: { inspectUi?: (o: unknown) => unknown } }).__twineMCP;
+          if (!api || typeof api.inspectUi !== 'function') return { ok: false, error: 'bridge-missing' };
+          return api.inspectUi({ selector: sel });
+        }, selector)) as { ok?: boolean; text?: string; buttons?: Array<{ ref: string; label: string; kind: string }>; inputs?: InputInfo[] };
+        if (frameRes && frameRes.ok) {
+          return { ok: true, selector, text: frameRes.text, buttons: frameRes.buttons, inputs: frameRes.inputs, frame: true };
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    return res;
+  }
+
   async wait(
     session: GameSession,
     opts: { ms?: number; forText?: string; timeoutMs?: number }
@@ -450,8 +721,14 @@ export class SessionManager {
     return { ok: true, waitedMs: Date.now() - t0, observation: await this.observe(session) };
   }
 
-  async screenshot(session: GameSession): Promise<Buffer> {
-    return session.page.screenshot({ type: 'png' });
+  async screenshot(session: GameSession, outPath?: string): Promise<Buffer> {
+    const buf = await session.page.screenshot({ type: 'png' });
+    if (outPath) {
+      const abs = path.resolve(outPath);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, buf);
+    }
+    return buf;
   }
 
   async back(session: GameSession): Promise<{ ok: boolean; observation?: Observation; error?: string; message?: string }> {

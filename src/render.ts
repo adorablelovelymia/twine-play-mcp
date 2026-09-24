@@ -25,6 +25,7 @@ export function renderObservation(obs: Observation, opts: RenderOptions = {}): s
     opts.previous &&
     opts.previous.text === obs.text &&
     opts.previous.passage === obs.passage &&
+    (opts.previous.dialog?.text ?? '') === (obs.dialog?.text ?? '') &&
     JSON.stringify(opts.previous.choices.map((c) => c.label)) === JSON.stringify(obs.choices.map((c) => c.label));
   if (unchanged) {
     lines.push('(no change since last observation)');
@@ -33,12 +34,19 @@ export function renderObservation(obs: Observation, opts: RenderOptions = {}): s
     lines.push(obs.text || '(empty passage)');
   }
 
+  if (obs.dialog) {
+    lines.push('');
+    lines.push(`Dialog${obs.dialog.title ? ` — ${oneLine(obs.dialog.title)}` : ''}:`);
+    if (obs.dialog.text) lines.push(obs.dialog.text.slice(0, 800));
+  }
+
   lines.push('');
   if (obs.choices.length) {
     lines.push(`Choices (${obs.choices.length}):`);
     obs.choices.forEach((c, i) => {
       const bits = [`${i + 1}. ${oneLine(c.label)}`];
       if (c.target) bits.push(`-> ${c.target}`);
+      if (c.dialog) bits.push('[dialog]');
       if (c.external) bits.push('[external]');
       if (c.disabled) bits.push('(disabled)');
       lines.push('  ' + bits.join(' '));
@@ -47,6 +55,11 @@ export function renderObservation(obs: Observation, opts: RenderOptions = {}): s
     lines.push('Choices (0): no visible choices.');
     if (obs.inputs.length) lines.push('  -> fill the inputs and/or press a key, then observe again.');
     else lines.push('  -> try wait, or this may be an ending / dead end.');
+  }
+
+  if (obs.ui?.length) {
+    lines.push('');
+    lines.push('UI: ' + obs.ui.map((u) => `${oneLine(u.label)} [${u.ref}]`).join(' · '));
   }
 
   if (obs.inputs.length) {

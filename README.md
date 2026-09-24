@@ -92,11 +92,14 @@ Environment variables:
 | `observe` | Passage text, numbered choices, inputs, status bar, variables (`since_last` saves tokens) |
 | `choose` | Click by 1-based number or label; `expected` guard; external links blocked by default |
 | `wait` | Wait for ms / for text / for the DOM to settle |
-| `interact` | Fill inputs/selects by ref, or press a key |
+| `interact` | Fill inputs/selects/checkboxes by ref, or press a key |
+| `click_ui` | Click dialogs, sidebar and menus (by ref / CSS selector / visible text), including inside iframes |
+| `upload_file` | Upload a local file into an `<input type=file>` (mod .zip, .save import) via trigger button or direct input, frame-aware |
+| `inspect_ui` | Inspect or discover UI panels outside the passage (mod GUIs, backstage); lists buttons/inputs and file inputs |
 | `back` | Undo one passage (SugarCube `Engine.backward`) |
 | `restart` | Restart from the beginning, optionally reseeding the PRNG |
 | `save_state` / `load_state` | Named in-session snapshots for branch exploration |
-| `screenshot` | PNG of the viewport (canvas/visual games, visual QA) |
+| `screenshot` | PNG of the viewport (canvas/visual games, visual QA); pass `path` to save to disk |
 | `get_console_errors` | JS exceptions, console errors and HTTP failures captured from the page |
 | `get_journal` | Action history: passages visited, choices taken, coverage counts |
 | `list_games` / `close_game` | Session management |
@@ -142,13 +145,31 @@ Variables: {"resistance":500,"pleasure":0,"degradation":0,...}
 - Spoiler policy: only what a player can see is returned. No passage lists or source
   dumps are exposed.
 
+## Complex games
+
+Real games are not just passages and links. The MCP handles the awkward parts:
+
+- **Modal dialogs** (SugarCube `#ui-dialog`, content gates, settings): their text appears as a
+  `Dialog:` block and their buttons/inputs are numbered like choices, so the agent can tick a
+  consent checkbox (`interact`) and click `Enter` (`choose`).
+- **Iframes**: mod managers and dev panels often live in a child frame. `inspect_ui` discovers
+  them (marked `[iframe]`), `click_ui` by text and `upload_file` search every frame.
+- **File workflows**: mod `.zip` import and save-file import go through `upload_file`, either
+  by clicking a trigger (`trigger_text` / `trigger_selector`, e.g. `#saves-import`) or by
+  pointing at an `<input type=file>` directly.
+- **DoL case study**: `test/fixtures` aside, `scripts/dol-mcp-test.ts` drives Degrees of
+  Lewdity end to end — consent gate → importing `ModI18N.mod.zip` and
+  `GameOriginalImagePack.mod.zip` through the in-game ModLoader GUI → page reload → importing
+  a real `.save` through the SAVES dialog → several turns of normal play.
+
 ## Tests
 
 ```bash
 npm run spike      # 17 checks against a real SugarCube 2.37 game (play, back, snapshot, screenshot)
 npm run formats    # 4 compiled fixtures: SugarCube 2.30, Harlowe 3.1, Snowman 2.0, Chapbook 1.0
-npm run smoke      # spawns the built MCP server and drives all 14 tools over stdio
+npm run smoke      # spawns the built MCP server and drives the tools over stdio
 npm run fixtures   # rebuild test/fixtures/compiled/*.html with Tweego (see test/fixtures/build.sh)
+npx tsx scripts/dol-mcp-test.ts   # Degrees of Lewdity: gate, mod import, save import, play
 ```
 
 `scripts/inspect.ts <fixture>` dumps the DOM/story-format internals of a game — handy when
@@ -160,6 +181,8 @@ adding a new adapter.
       snapshots, backtracking, console+network QA capture, stdio MCP, spike + smoke tests
 - [x] M2: Harlowe / Chapbook / Snowman adapters verified against compiled fixtures
 - [x] M2: play journal (`get_journal`) for run summaries, resuming and QA coverage
+- [x] M3: dialogs/iframe-aware UI control (`click_ui`, `inspect_ui`, `upload_file`) — verified on
+      Degrees of Lewdity (mod import + save import + play)
 - [ ] M3: `click_at` for canvas games, spoiler-gated story-map analysis, npm packaging
 
 ## Safety notes

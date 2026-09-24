@@ -30,11 +30,13 @@
 
   const normalize = (s) => String(s == null ? '' : s).replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim();
 
+  const normalizeLabelText = (s) => normalize(s).toLowerCase();
+
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   const isElementVisible = (el) => {
     if (!el || !el.isConnected) return false;
-    if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
+    if (el.hidden) return false;
     const style = window.getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
     return el.getClientRects().length > 0;
@@ -258,6 +260,7 @@
     if (tag === 'select') {
       base.options = Array.from(el.options).slice(0, 60).map((o) => ({ value: o.value, label: normalize(o.textContent || '').slice(0, 120) }));
     }
+    if (type === 'checkbox' || type === 'radio') base.checked = !!el.checked;
     return base;
   };
 
@@ -268,17 +271,30 @@
 
     const choices = [];
     const inputs = [];
+    const ui = [];
     const seen = new Set();
     let cIdx = 0;
     let iIdx = 0;
+    let uIdx = 0;
 
+    const UI_EXCLUDE = '#ui-bar, tw-sidebar, .tw-sidebar, #menu, .menu, #backstage, [data-cb-backstage], footer, header, #spinner, .warnings, [data-cb-restart]';
+    const UI_CONTAINERS = '#ui-dialog, .ui-dialog, #ui-bar, #startCaption, #story-caption, #startBannerModLoaderGui, #ui-overlay';
+
+    const dialogEl = () => {
+      for (const el of document.querySelectorAll('#ui-dialog, .ui-dialog, dialog')) {
+        if (isElementVisible(el)) return el;
+      }
+      return null;
+    };
+
+    // 1. Passage-scoped choices.
     for (const sel of CHOICE_SELECTORS) {
       for (const el of scope.querySelectorAll(sel)) {
         if (seen.has(el)) continue;
         seen.add(el);
         if (choices.length >= 120) break;
         if (!isElementVisible(el)) continue;
-        if (el.closest('#ui-bar, tw-sidebar, .tw-sidebar, #menu, .menu, #backstage, [data-cb-backstage], footer, header, #spinner, .warnings, [data-cb-restart]')) continue;
+        if (el.closest(UI_EXCLUDE)) continue;
         if (el.hasAttribute('data-twmcp-skip')) continue;
         if (['input', 'textarea', 'select'].includes(el.tagName.toLowerCase())) continue;
         const ref = 'c' + (++cIdx);
@@ -289,7 +305,8 @@
       }
     }
 
-    const inputSel = 'input:not([type="hidden"]):not([type="button"]):not([type="submit"]), textarea, select';
+    // 2. Inputs inside the passage.
+    const inputSel = 'input:not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="file"]), textarea, select';
     for (const el of scope.querySelectorAll(inputSel)) {
       if (seen.has(el)) continue;
       seen.add(el);
@@ -300,7 +317,48 @@
       inputs.push(describeInput(el, ref));
     }
 
-    return { choices, inputs };
+    // 3. Modal dialog buttons and inputs become numbered choices / inputs (the agent must be able to answer dialogs).
+    let dialog = null;
+    const dlg = dialogEl();
+    if (dlg) {
+      const dlgText = normalize(dlg.innerText || '').slice(0, 1200);
+      const titleEl = dlg.querySelector('.ui-dialog-title, .title, h3');
+      const buttons = [];
+      for (const el of dlg.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"], .link-internal')) {
+        if (!isElementVisible(el) || seen.has(el)) continue;
+        seen.add(el);
+        const ref = 'c' + (++cIdx);
+        el.setAttribute('data-twmcp-ref', ref);
+        const d = describeChoice(el, ref);
+        if (!d.label) continue;
+        d.dialog = true;
+        choices.push(d);
+        buttons.push(d);
+      }
+      for (const el of dlg.querySelectorAll('input:not([type="hidden"]), textarea, select')) {
+        if (!isElementVisible(el) || seen.has(el) || inputs.length >= 40) continue;
+        seen.add(el);
+        const ref = 'i' + (++iIdx);
+        el.setAttribute('data-twmcp-ref', ref);
+        const d = describeInput(el, ref);
+        d.dialog = true;
+        inputs.push(d);
+      }
+      dialog = { title: titleEl ? normalize(titleEl.textContent || '').slice(0, 120) : null, text: dlgText, buttons: buttons.length };
+    }
+
+    // 4. Ambient UI (sidebar, menu, ModLoader banner) exposed separately, not as passage choices.
+    for (const el of document.querySelectorAll('#ui-bar button, #ui-bar a, #startCaption button, #startCaption a, #story-caption button, #story-caption a, #startBannerModLoaderGui, #ui-bar-tray button')) {
+      if (seen.has(el) || !isElementVisible(el) || ui.length >= 25) continue;
+      const label = normalize(el.innerText || el.value || el.getAttribute('aria-label') || el.title || '').slice(0, 60);
+      if (!label) continue;
+      seen.add(el);
+      const ref = 'u' + (++uIdx);
+      el.setAttribute('data-twmcp-ref', ref);
+      ui.push({ ref, label, kind: 'ui' });
+    }
+
+    return { choices, inputs, ui, dialog };
   };
 
   // ---------------------------------------------------------------------------
@@ -498,6 +556,8 @@
       text,
       choices: interactives.choices,
       inputs: interactives.inputs,
+      ui: interactives.ui,
+      dialog: interactives.dialog,
       status,
       variables,
       engineState: engineState(),
@@ -548,8 +608,178 @@
     }
   };
 
-  const pressKey = (key) => {
+  let refSeq = 0;
+  const nextRef = (prefix) => prefix + (++refSeq);
+
+  const UI_CANDIDATES = 'button, a, [role="button"], [role="link"], input[type="button"], input[type="submit"], .link-internal, [onclick], [data-twmcp-ref]';
+
+  /** Resolve a UI element by ref, CSS selector or visible text into a data-twmcp-ref. */
+  const resolveUi = (opts) => {
+    const o = opts || {};
+    if (o.ref) {
+      const ref = String(o.ref).replace(/["\\]/g, '');
+      const el = document.querySelector('[data-twmcp-ref="' + ref + '"]');
+      return el ? { ok: true, ref } : { ok: false, error: 'stale-ref', message: 'Ref ' + ref + ' no longer exists.' };
+    }
+    if (o.selector) {
+      let el = null;
+      try {
+        el = document.querySelector(String(o.selector));
+      } catch (e) {
+        return { ok: false, error: 'bad-selector', message: String((e && e.message) || e) };
+      }
+      if (!el) return { ok: false, error: 'no-match', message: 'No element matches selector "' + o.selector + '".' };
+      const ref = nextRef('x');
+      el.setAttribute('data-twmcp-ref', ref);
+      return { ok: true, ref, label: normalize(el.innerText || el.value || '').slice(0, 80) };
+    }
+    if (o.text) {
+      const needle = normalizeLabelText(o.text);
+      const exact = !!o.exact;
+      const cands = [];
+      for (const el of document.querySelectorAll(UI_CANDIDATES)) {
+        if (!isElementVisible(el)) continue;
+        const label = normalize(el.innerText || el.value || el.getAttribute('aria-label') || el.title || '');
+        if (!label) continue;
+        const hay = normalizeLabelText(label);
+        const hit = exact ? hay === needle : hay.includes(needle);
+        if (hit) cands.push({ el, label });
+      }
+      if (!cands.length) return { ok: false, error: 'no-match', message: 'No visible UI element contains "' + o.text + '".' };
+      cands.sort((a, b) => a.label.length - b.label.length);
+      const pick = cands[0];
+      const ref = nextRef('x');
+      pick.el.setAttribute('data-twmcp-ref', ref);
+      return { ok: true, ref, label: pick.label, matches: cands.length, alternatives: cands.slice(1, 6).map((c) => c.label) };
+    }
+    return { ok: false, error: 'missing-argument', message: 'Provide ref, selector or text.' };
+  };
+
+  /** Inspect any DOM subtree (dialogs, mod GUIs, backstage panels): text + ref'd buttons/inputs.
+   *  Without a selector, discovers overlay-like panels that contain buttons or file inputs. */
+  const inspectUi = (opts) => {
+    const o = opts || {};
+    const cssPath = (el) => {
+      if (el.id) return '#' + el.id;
+      const parts = [];
+      let cur = el;
+      while (cur && cur.nodeType === 1 && cur !== document.body && parts.length < 4) {
+        let part = cur.tagName.toLowerCase();
+        if (cur.className && typeof cur.className === 'string') {
+          const cls = cur.className.trim().split(/\s+/).filter((c) => c && c.length < 40).slice(0, 2);
+          if (cls.length) part += '.' + cls.join('.');
+        }
+        const parent = cur.parentElement;
+        if (parent) {
+          const sameTag = Array.from(parent.children).filter((c) => c.tagName === cur.tagName);
+          if (sameTag.length > 1) part += ':nth-of-type(' + (sameTag.indexOf(cur) + 1) + ')';
+        }
+        parts.unshift(part);
+        if (cur.id) {
+          parts[0] = '#' + cur.id;
+          break;
+        }
+        cur = parent;
+      }
+      return parts.join(' > ');
+    };
+
+    const describePanel = (el) => {
+      let buttons = 0;
+      let fileInputs = 0;
+      let inputs = 0;
+      for (const b of el.querySelectorAll('button, a, [role=button], input[type=button], input[type=submit], .link-internal, [onclick]')) {
+        if (isElementVisible(b)) buttons++;
+      }
+      for (const i of el.querySelectorAll('input, textarea, select')) {
+        if (i.getAttribute('type') === 'file') fileInputs++;
+        else if (isElementVisible(i)) inputs++;
+      }
+      let text = normalize(el.innerText || '');
+      try {
+        const values = Array.from(el.querySelectorAll('textarea, input'))
+          .map((v) => v.value)
+          .filter((v) => v && v.length < 500)
+          .join(' | ');
+        if (values) text = ('⟦values: ' + values + '⟧ ' + text).slice(0, 400);
+      } catch (_) { /* ignore */ }
+      const r = el.getBoundingClientRect();
+      return {
+        selector: cssPath(el),
+        id: el.id || null,
+        cls: String(el.className || '').slice(0, 80),
+        tag: el.tagName.toLowerCase(),
+        buttons,
+        inputs,
+        fileInputs,
+        area: Math.round(r.width) * Math.round(r.height),
+        text: text.slice(0, 320)
+      };
+    };
+
+    if (!o.selector) {
+      const cands = [];
+      const seenCand = new Set();
+      const consider = (el) => {
+        if (!el || el === document.body || el === document.documentElement || seenCand.has(el)) return;
+        seenCand.add(el);
+        const r = el.getBoundingClientRect();
+        if (r.width < 120 || r.height < 60) return;
+        const p = describePanel(el);
+        if (p.buttons === 0 && p.fileInputs === 0) return;
+        cands.push(p);
+      };
+      // 1) File inputs are the strongest signal (mod import, save import UIs): walk up from each.
+      for (const f of document.querySelectorAll('input[type="file"]')) {
+        let cur = f.parentElement;
+        for (let depth = 0; cur && depth < 4; depth++, cur = cur.parentElement) consider(cur);
+      }
+      // 2) Overlay-like panels anywhere.
+      for (const el of document.querySelectorAll('body *')) {
+        const st = window.getComputedStyle(el);
+        if (st.position !== 'fixed' && st.position !== 'absolute') continue;
+        consider(el);
+      }
+      cands.sort((a, b) => b.fileInputs - a.fileInputs || a.area - b.area || b.buttons - a.buttons);
+      // Drop larger candidates fully covered by a smaller one with the same counts.
+      const filtered = cands.filter((c) => !cands.some((o2) => o2 !== c && o2.area < c.area && o2.fileInputs >= c.fileInputs && o2.buttons >= c.buttons && c.text.startsWith(o2.text.slice(0, 40))));
+      return { ok: true, candidates: filtered.slice(0, 20) };
+    }
+
+    let el = null;
     try {
+      el = document.querySelector(String(o.selector));
+    } catch (e) {
+      return { ok: false, error: 'bad-selector', message: String((e && e.message) || e) };
+    }
+    if (!el) return { ok: false, error: 'no-match', message: 'No element matches "' + o.selector + '"' };
+
+    const text = normalize(el.innerText || '').slice(0, 4000);
+    const buttons = [];
+    for (const b of el.querySelectorAll('button, a, [role=button], input[type=button], input[type=submit], .link-internal, [onclick]')) {
+      if (buttons.length >= 60 || !isElementVisible(b)) continue;
+      const label = normalize(b.innerText || b.value || b.getAttribute('aria-label') || b.title || '').slice(0, 80);
+      if (!label) continue;
+      const ref = nextRef('x');
+      b.setAttribute('data-twmcp-ref', ref);
+      buttons.push({ ref, label, kind: b.tagName.toLowerCase() + (b.getAttribute('type') ? ':' + b.getAttribute('type') : '') });
+    }
+    const inputs = [];
+    for (const i of el.querySelectorAll('input, textarea, select')) {
+      if (inputs.length >= 30) continue;
+      const t = (i.getAttribute('type') || '').toLowerCase();
+      if (t === 'hidden') continue;
+      if (t !== 'file' && !isElementVisible(i)) continue;
+      const ref = nextRef('x');
+      i.setAttribute('data-twmcp-ref', ref);
+      const d = describeInput(i, ref);
+      if (t === 'file') d.kind = 'file';
+      inputs.push(d);
+    }
+    return { ok: true, selector: String(o.selector), text, buttons, inputs };
+  };
+
+  const pressKey = (key) => {    try {
       const target = document.activeElement || document.body;
       target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
       target.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true, cancelable: true }));
@@ -727,6 +957,8 @@
     observe,
     waitStable,
     clickRef,
+    resolveUi,
+    inspectUi,
     fillRef,
     pressKey,
     restart,
