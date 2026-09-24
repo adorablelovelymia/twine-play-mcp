@@ -382,7 +382,7 @@ export function buildServer(manager: SessionManager): McpServer {
           lines.push('', 'Inputs:');
           for (const inp of res.inputs) {
             lines.push(
-              `  ${inp.ref || '(file input — use upload_file)'} ${inp.kind}${inp.name ? ` name="${inp.name}"` : ''}${inp.value ? ` value="${String(inp.value).slice(0, 40)}"` : ''}` +
+              `  ${inp.ref || '(file input — use upload_file)'} ${inp.kind}${inp.label ? ` "${inp.label.slice(0, 40)}"` : ''}${inp.name ? ` name="${inp.name}"` : ''}${inp.value ? ` value="${String(inp.value).slice(0, 40)}"` : ''}` +
                 (inp.checked !== undefined ? ` checked=${inp.checked}` : '')
             );
           }

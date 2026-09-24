@@ -249,6 +249,12 @@
   const describeInput = (el, ref) => {
     const tag = el.tagName.toLowerCase();
     const type = (el.getAttribute('type') || (tag === 'textarea' ? 'textarea' : tag === 'select' ? 'select' : 'text')).toLowerCase();
+    let label = '';
+    try {
+      const native = el.labels && el.labels.length ? el.labels[0].innerText : null;
+      const wrapped = el.closest ? el.closest('label') : null;
+      label = normalize(native || (wrapped && wrapped.innerText) || el.getAttribute('aria-label') || el.title || '').slice(0, 70);
+    } catch (_) { /* ignore */ }
     const base = {
       ref,
       kind: tag === 'select' ? 'select' : type,
@@ -257,6 +263,7 @@
       value: typeof el.value === 'string' ? el.value.slice(0, 300) : null,
       disabled: !!el.disabled
     };
+    if (label && type !== 'text' && type !== 'search' && type !== 'number' && type !== 'password') base.label = label;
     if (tag === 'select') {
       base.options = Array.from(el.options).slice(0, 60).map((o) => ({ value: o.value, label: normalize(o.textContent || '').slice(0, 120) }));
     }

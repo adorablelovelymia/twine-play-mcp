@@ -67,8 +67,10 @@ export function renderObservation(obs: Observation, opts: RenderOptions = {}): s
     lines.push(`Inputs (${obs.inputs.length}):`);
     for (const inp of obs.inputs) {
       const bits = [`${inp.ref} ${inp.kind}`];
+      if (inp.label) bits.push(`"${inp.label.slice(0, 50)}"`);
       if (inp.name) bits.push(`name="${inp.name}"`);
-      if (inp.value) bits.push(`value="${inp.value.slice(0, 60)}"`);
+      if (inp.value && inp.kind !== 'checkbox' && inp.kind !== 'radio') bits.push(`value="${inp.value.slice(0, 60)}"`);
+      if (inp.checked !== undefined) bits.push(inp.checked ? '[checked]' : '[unchecked]');
       if (inp.placeholder) bits.push(`placeholder="${inp.placeholder.slice(0, 60)}"`);
       if (inp.options?.length) bits.push(`options=[${inp.options.map((o) => o.label).join(' | ').slice(0, 200)}]`);
       lines.push('  ' + bits.join(' '));

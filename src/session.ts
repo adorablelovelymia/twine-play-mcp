@@ -23,6 +23,7 @@ export interface InputInfo {
   value: string | null;
   options?: Array<{ value: string; label: string }>;
   disabled: boolean;
+  label?: string;
   checked?: boolean;
   dialog?: boolean;
 }
