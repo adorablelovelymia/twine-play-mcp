@@ -1,0 +1,178 @@
+# twine-play-mcp
+
+An MCP server that lets AI agents **play, test and QA Twine / interactive-fiction HTML games**.
+
+The agent reads the current passage, sees numbered choices, clicks them, watches story
+variables, screenshots the game, and can save/restore state to explore branches — all
+through a small, token-friendly tool surface instead of a generic browser automation API.
+
+```
+Agent  ──MCP(stdio)──>  twine-play-mcp  ──Playwright──>  headless Chrome
+                              │                               │
+                              │  static server (127.0.0.1)    │  injected bridge
+                              └────────> game HTML <──────────┘
+```
+
+## Why not a generic browser MCP?
+
+Generic browser MCPs make the model guess DOM selectors, dump whole pages into context
+and have no notion of "story state". This server adds a semantic layer:
+
+- **Passage view**: text as Markdown, passage name, format/version, story metadata
+- **Numbered choices** with target passage names (and external-link blocking)
+- **Story variables** (SugarCube `State.variables`) with safe depth/size caps
+- **Native state**: SugarCube `Engine.backward/forward`, `Save.base64` snapshots
+- **Format detection**: SugarCube first, DOM fallback for Harlowe / Snowman / Chapbook / unknown
+- **Tracker blocking** and quiet console/network capture for clean playtesting
+
+## Requirements
+
+- Node.js >= 20 (developed on 26)
+- Google Chrome installed (uses `channel: 'chrome'`; no 200 MB browser download)
+- Linux/macOS/Windows
+
+## Quick start
+
+```bash
+npm install
+npm run build          # compiles to dist/ and copies the page bridge
+
+# sanity checks (optional)
+npm run spike          # 17 end-to-end checks against a real SugarCube game
+npm run smoke          # spawns the MCP server over stdio and drives it with the MCP SDK
+```
+
+Point it at any published Twine HTML file (or a folder containing the game + assets):
+
+```bash
+node dist/index.js     # MCP server on stdio
+```
+
+## Client configuration
+
+### OpenCode (`~/.config/opencode/opencode.json`)
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "twine-play": {
+      "type": "local",
+      "command": ["node", "/absolute/path/to/twine-play-mcp/dist/index.js"],
+      "enabled": true
+    }
+  }
+}
+```
+
+### Claude Desktop / Cursor / any `mcpServers` client
+
+```json
+{
+  "mcpServers": {
+    "twine-play": {
+      "command": "node",
+      "args": ["/absolute/path/to/twine-play-mcp/dist/index.js"]
+    }
+  }
+}
+```
+
+Environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `TWMCP_CHROME_PATH` | Chrome executable if `channel: 'chrome'` cannot find it |
+
+## Tools
+
+| Tool | What it does |
+| --- | --- |
+| `open_game` | Open a local HTML file/folder or URL; optional PRNG seed; returns first observation |
+| `observe` | Passage text, numbered choices, inputs, status bar, variables (`since_last` saves tokens) |
+| `choose` | Click by 1-based number or label; `expected` guard; external links blocked by default |
+| `wait` | Wait for ms / for text / for the DOM to settle |
+| `interact` | Fill inputs/selects by ref, or press a key |
+| `back` | Undo one passage (SugarCube `Engine.backward`) |
+| `restart` | Restart from the beginning, optionally reseeding the PRNG |
+| `save_state` / `load_state` | Named in-session snapshots for branch exploration |
+| `screenshot` | PNG of the viewport (canvas/visual games, visual QA) |
+| `get_console_errors` | JS exceptions, console errors and HTTP failures captured from the page |
+| `get_journal` | Action history: passages visited, choices taken, coverage counts |
+| `list_games` / `close_game` | Session management |
+
+## Format support
+
+| Format | Detect | Text/choices | Variables | Passage name | Back | Snapshots |
+| --- | --- | --- | --- | --- | --- | --- |
+| **SugarCube 2.21+** | ✅ | ✅ | ✅ `State.variables` | ✅ | ✅ `Engine.backward` | ✅ `Save.base64` (2.37+) / `Save.deserialize` (older) |
+| **Harlowe 3** | ✅ | ✅ | — (engine internals are private) | — | ✅ sidebar undo | — |
+| **Snowman 2** | ✅ | ✅ | ✅ `story.state` | ✅ | — | ✅ state JSON |
+| **Chapbook 1** | ✅ | ✅ | ✅ `engine.state.saveToObject()` | ✅ `trail` | — | ✅ `restoreFromObject` |
+| **Unknown HTML** | generic | ✅ DOM heuristics | — | — | — | — |
+
+Everything degrades gracefully: an unknown or exotic format still plays with the generic DOM
+path; format-specific tools report `unsupported` instead of failing.
+
+## Play-session example (what the agent sees)
+
+```
+[sugarcube 2.37.3 · step 3 · engine=idle · passage: 069]
+You squeeze through the narrow gap...
+
+Choices (2):
+  1. Go deeper -> 070
+  2. Check the mirror
+
+Status:
+Resistance: 500/500
+Variables: {"resistance":500,"pleasure":0,"degradation":0,...}
+```
+
+## How it works
+
+- `src/bridge/bridge.js` is injected into every page (`addInitScript`) and exposes
+  `window.__twineMCP`: format detection, passage/choice extraction, click/fill helpers,
+  settle-waiting, snapshots and seeding. All server calls go through this bridge only.
+- `src/session.ts` owns the browser, one `BrowserContext` per game (isolated saves) and a
+  tiny static server so local games run on `http://127.0.0.1` (localStorage works).
+- `src/render.ts` turns observations into compact Markdown for the model.
+- Choices get temporary `data-twmcp-ref` attributes; the server prefers real Playwright
+  clicks and falls back to DOM clicks for exotic macro-generated links.
+- Spoiler policy: only what a player can see is returned. No passage lists or source
+  dumps are exposed.
+
+## Tests
+
+```bash
+npm run spike      # 17 checks against a real SugarCube 2.37 game (play, back, snapshot, screenshot)
+npm run formats    # 4 compiled fixtures: SugarCube 2.30, Harlowe 3.1, Snowman 2.0, Chapbook 1.0
+npm run smoke      # spawns the built MCP server and drives all 14 tools over stdio
+npm run fixtures   # rebuild test/fixtures/compiled/*.html with Tweego (see test/fixtures/build.sh)
+```
+
+`scripts/inspect.ts <fixture>` dumps the DOM/story-format internals of a game — handy when
+adding a new adapter.
+
+## Status / roadmap
+
+- [x] M1: SugarCube adapter, generic DOM fallback, observation/choice/input/wait/screenshot,
+      snapshots, backtracking, console+network QA capture, stdio MCP, spike + smoke tests
+- [x] M2: Harlowe / Chapbook / Snowman adapters verified against compiled fixtures
+- [x] M2: play journal (`get_journal`) for run summaries, resuming and QA coverage
+- [ ] M3: `click_at` for canvas games, spoiler-gated story-map analysis, npm packaging
+
+## Safety notes
+
+- Page scripts run in Chrome's sandbox; the bridge never exposes Node to the page.
+- No arbitrary `eval` tool is exposed to the agent.
+- Analytics/tracker hosts are blocked by default (`block_trackers: false` to disable).
+- External links are blocked unless `allow_external: true` is passed.
+
+## 中文速览
+
+这是一个让 AI agent 游玩 / 测试 Twine 文字游戏的 MCP 服务：无头 Chrome + 页面桥，
+提供观察、选项点击、变量读取、存档回溯、截图、控制台 QA 等 13 个工具。
+本地游戏会通过内置静态服务器以 `http://127.0.0.1` 打开（保证存档可用），
+支持 SugarCube 原生 API，其余格式走通用 DOM 兜底。
+配置方式见上方 OpenCode / Claude Desktop 片段。

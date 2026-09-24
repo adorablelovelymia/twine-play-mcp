@@ -1,0 +1,30 @@
+:: StoryTitle
+MCP Harlowe Fixture
+
+:: StoryData
+{
+  "ifid": "a1b2c3d4-2222-4222-8222-222222222222",
+  "format": "Harlowe",
+  "format-version": "3.1.0",
+  "start": "Start"
+}
+
+:: Start
+You wake up in a cold room. A door leads north.
+(set: $seen to true)
+(set: $coins to 7)
+[[Open the door->Hall]]
+[[Look at the mirror->Mirror]]
+
+:: Hall
+A long corridor stretches ahead.
+[[Continue->End]]
+[[Go back->Start]]
+
+:: Mirror
+Your reflection is pale.
+(set: $coins to it + 5)
+[[Leave->Start]]
+
+:: End
+You escape. The end.

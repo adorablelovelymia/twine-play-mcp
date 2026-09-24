@@ -1,0 +1,41 @@
+:: StoryTitle
+MCP Chapbook Fixture
+
+:: StoryData
+{
+  "ifid": "a1b2c3d4-4444-4444-8444-444444444444",
+  "format": "Chapbook",
+  "format-version": "1.0.0",
+  "start": "Start"
+}
+
+:: Start
+seen: false
+coins: 7
+--
+
+You are in a small room. Seen: {seen}. Coins: {coins}.
+
+[[Open the door->Hall]]
+[[Look in the mirror->Mirror]]
+
+:: Hall
+--
+
+The hall is long.
+[[Continue->End]]
+[[Go back->Start]]
+
+:: Mirror
+seen: true
+coins: coins + 5
+--
+
+Your reflection smiles. Coins: {coins}.
+
+[[Back->Start]]
+
+:: End
+--
+
+The end.

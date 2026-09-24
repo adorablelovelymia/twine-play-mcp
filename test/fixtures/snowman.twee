@@ -1,0 +1,34 @@
+:: StoryTitle
+MCP Snowman Fixture
+
+:: StoryData
+{
+  "ifid": "a1b2c3d4-3333-4333-8333-333333333333",
+  "format": "Snowman",
+  "format-version": "2.0.2",
+  "start": "Start"
+}
+
+:: Start
+You stand at the entrance.
+<%
+story.state.seen = true;
+story.state.coins = 7;
+%>
+[[Enter->Hall]]
+[[Look around->Mirror]]
+
+:: Hall
+The hall is quiet.
+[[Go on->End]]
+[[Back->Start]]
+
+:: Mirror
+Dust covers everything.
+<%
+story.state.coins = story.state.coins + 5;
+%>
+[[Back->Start]]
+
+:: End
+You leave. The end.

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "twine-play": {
+      "command": "node",
+      "args": ["/home/qiyue/Projects/twine-play-mcp/dist/index.js"]
+    }
+  }
+}

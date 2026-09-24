@@ -1,0 +1,741 @@
+/* Twine Play MCP - in-page bridge.
+ *
+ * Injected into every game page via Playwright addInitScript. Exposes a single
+ * global, window.__twineMCP, used by the MCP server through page.evaluate().
+ *
+ * Design rules:
+ *  - Never throw across the bridge: every public call returns { ok, ... } or a
+ *    JSON-safe observation object.
+ *  - Story-format specifics live in adapters; everything has a generic DOM
+ *    fallback so unknown formats still play.
+ *  - No network, no eval, no access to Node.
+ */
+(() => {
+  'use strict';
+
+  if (window.__twineMCP) return;
+
+  // ---------------------------------------------------------------------------
+  // Utilities
+  // ---------------------------------------------------------------------------
+
+  const BLOCK_TAGS = new Set([
+    'address', 'article', 'aside', 'blockquote', 'div', 'dl', 'dd', 'dt',
+    'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3',
+    'h4', 'h5', 'h6', 'header', 'hr', 'li', 'main', 'nav', 'ol', 'p', 'pre',
+    'section', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'ul'
+  ]);
+
+  const SKIP_TAGS = new Set(['script', 'style', 'noscript', 'template', 'svg', 'canvas', 'audio', 'video', 'source']);
+
+  const normalize = (s) => String(s == null ? '' : s).replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim();
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  const isElementVisible = (el) => {
+    if (!el || !el.isConnected) return false;
+    if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+    return el.getClientRects().length > 0;
+  };
+
+  // ---------------------------------------------------------------------------
+  // Story format detection and adapters
+  // ---------------------------------------------------------------------------
+
+  const storyDataEl = () => document.querySelector('tw-storydata');
+
+  const storyMeta = () => {
+    const el = storyDataEl();
+    if (!el) return {};
+    return {
+      title: el.getAttribute('name') || document.title || null,
+      format: el.getAttribute('format') || null,
+      formatVersion: el.getAttribute('format-version') || null,
+      ifid: el.getAttribute('ifid') || null,
+      startNode: el.getAttribute('startnode') || null,
+      creator: el.getAttribute('creator') || null,
+      options: el.getAttribute('options') || null
+    };
+  };
+
+  const sugar = () => window.SugarCube || null;
+
+  const detectFormat = () => {
+    const meta = storyMeta();
+    const declared = String(meta.format || '').toLowerCase();
+    const g = window;
+
+    const hasSugar = !!(g.SugarCube || (g.Engine && g.State && g.Story));
+    const hasChapbook = !!(g.engine && g.engine.state);
+    const hasSnowman = !!(g.story && typeof g.story === 'object');
+    // Snowman 2 also renders a <tw-passage>, so the declared format must win over DOM heuristics.
+    const hasHarloweDom = !!document.querySelector('tw-passage');
+
+    let name;
+    if (declared.includes('sugarcube')) name = 'sugarcube';
+    else if (declared.includes('harlowe')) name = 'harlowe';
+    else if (declared.includes('chapbook')) name = 'chapbook';
+    else if (declared.includes('snowman')) name = 'snowman';
+    else if (hasSugar) name = 'sugarcube';
+    else if (hasChapbook) name = 'chapbook';
+    else if (hasSnowman) name = 'snowman';
+    else if (hasHarloweDom || g.Harlowe) name = 'harlowe';
+    else if (declared) name = declared;
+    else name = 'generic';
+
+    let version = meta.formatVersion || null;
+    if (name === 'sugarcube' && g.SugarCube && g.SugarCube.version) {
+      version = String(g.SugarCube.version);
+    }
+    return { name, version };
+  };
+
+  // ---------------------------------------------------------------------------
+  // Root / passage lookup
+  // ---------------------------------------------------------------------------
+
+  const PASSAGE_SELECTORS = ['#passage', 'tw-passage', '#page article', '#story .passage', '.passage', 'tw-story', '#story'];
+
+  const getPassageRoot = () => {
+    for (const sel of PASSAGE_SELECTORS) {
+      const els = Array.from(document.querySelectorAll(sel));
+      for (const el of els) {
+        if (isElementVisible(el)) return el;
+      }
+    }
+    return null;
+  };
+
+  const readPassageName = (fmt) => {
+    const g = window;
+    try {
+      if (fmt === 'sugarcube') {
+        const S = sugar() || g;
+        if (S.State && S.State.passage) return String(S.State.passage);
+      }
+      if (fmt === 'snowman') {
+        const p = (g.passage && g.passage.name) ? g.passage : (g.story && g.story.passage);
+        if (p) return String(p.name || p.title || p);
+      }
+      if (fmt === 'harlowe') {
+        if (g.Engine && g.Engine.passage) return String(g.Engine.passage);
+        if (g.State && g.State.passage) return String(g.State.passage);
+      }
+      if (fmt === 'chapbook') {
+        const st = g.engine && g.engine.state;
+        if (st && typeof st.get === 'function') {
+          try {
+            const trail = st.get('trail');
+            if (Array.isArray(trail) && trail.length) return String(trail[trail.length - 1]);
+          } catch (_) { /* ignore */ }
+        }
+        if (g.passage && g.passage.name) return String(g.passage.name);
+      }
+    } catch (_) { /* ignore */ }
+    const root = getPassageRoot();
+    const named = root && root.getAttribute && (root.getAttribute('data-passage') || root.getAttribute('passage-name'));
+    return named || null;
+  };
+
+  // ---------------------------------------------------------------------------
+  // Text extraction: DOM -> markdown-ish plain text
+  // ---------------------------------------------------------------------------
+
+  const htmlToMarkdown = (root, maxChars) => {
+    const out = [];
+
+    const emit = (s) => {
+      if (s) out.push(s);
+    };
+
+    const walk = (node) => {
+      if (out.length > 40000) return; // hard safety cap while walking
+      if (node.nodeType === Node.TEXT_NODE) {
+        emit(node.nodeValue.replace(/\u00a0/g, ' '));
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+      const el = node;
+      const tag = el.tagName.toLowerCase();
+      if (SKIP_TAGS.has(tag)) return;
+      if (el.hidden || el.getAttribute('aria-hidden') === 'true') return;
+
+      let style = null;
+      try { style = window.getComputedStyle(el); } catch (_) { /* ignore */ }
+      if (style && (style.display === 'none' || style.visibility === 'hidden')) return;
+
+      if (tag === 'br') { emit('\n'); return; }
+
+      if (tag === 'img') {
+        const alt = el.getAttribute('alt') || '';
+        const src = el.getAttribute('src') || '';
+        if (src) emit('[image' + (alt ? ': ' + alt : '') + ']');
+        return;
+      }
+
+      const block = BLOCK_TAGS.has(tag);
+      if (block) emit('\n');
+
+      if (tag === 'strong' || tag === 'b') emit('**');
+      if (tag === 'em' || tag === 'i') emit('*');
+      if (tag === 'code') emit('`');
+
+      for (const child of el.childNodes) walk(child);
+
+      if (tag === 'code') emit('`');
+      if (tag === 'em' || tag === 'i') emit('*');
+      if (tag === 'strong' || tag === 'b') emit('**');
+
+      if (block) emit('\n');
+    };
+
+    walk(root);
+
+    let text = out.join('');
+    text = text
+      .replace(/\u00a0/g, ' ')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .replace(/[ \t]{2,}/g, ' ')
+      .trim();
+    if (maxChars && text.length > maxChars) {
+      text = text.slice(0, maxChars) + '\n… [truncated, ' + text.length + ' chars total]';
+    }
+    return text;
+  };
+
+  // ---------------------------------------------------------------------------
+  // Choices and inputs
+  // ---------------------------------------------------------------------------
+
+  const CHOICE_SELECTORS = [
+    'a[data-passage]', 'a.link-internal', 'a.internalLink',
+    'tw-link', 'a.link-external', 'a[href]',
+    'button', 'input[type="button"]', 'input[type="submit"]',
+    '[role="link"]', '[role="button"]'
+  ];
+
+  const INTERACTIVE_SKIP = new Set(['link-external']);
+
+  const describeChoice = (el, ref) => {
+    const tag = el.tagName.toLowerCase();
+    const label = normalize(el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').slice(0, 300);
+    const href = el.getAttribute('href') || '';
+    const dataPassage = el.getAttribute('data-passage');
+    const passageName = el.getAttribute('passage-name');
+    let kind = 'link';
+    if (tag === 'button' || (tag === 'input' && /^(button|submit)$/i.test(el.getAttribute('type') || ''))) kind = 'button';
+    else if (tag === 'tw-link') kind = 'harlowe-link';
+    else if (el.classList.contains('link-external')) kind = 'external-link';
+    else if (/^https?:/i.test(href)) kind = 'external-link';
+    else if (dataPassage || passageName || el.classList.contains('link-internal') || el.classList.contains('internalLink')) kind = 'internal-link';
+    const target = dataPassage || passageName || null;
+    return {
+      ref,
+      label,
+      kind,
+      target: target || null,
+      href: /^https?:/i.test(href) ? href : null,
+      disabled: !!el.disabled,
+      external: kind === 'external-link'
+    };
+  };
+
+  const describeInput = (el, ref) => {
+    const tag = el.tagName.toLowerCase();
+    const type = (el.getAttribute('type') || (tag === 'textarea' ? 'textarea' : tag === 'select' ? 'select' : 'text')).toLowerCase();
+    const base = {
+      ref,
+      kind: tag === 'select' ? 'select' : type,
+      name: el.getAttribute('name') || null,
+      placeholder: el.getAttribute('placeholder') || null,
+      value: typeof el.value === 'string' ? el.value.slice(0, 300) : null,
+      disabled: !!el.disabled
+    };
+    if (tag === 'select') {
+      base.options = Array.from(el.options).slice(0, 60).map((o) => ({ value: o.value, label: normalize(o.textContent || '').slice(0, 120) }));
+    }
+    return base;
+  };
+
+  const collectInteractives = (root) => {
+    const scope = root || document;
+    // Clear stale refs page-wide.
+    for (const el of document.querySelectorAll('[data-twmcp-ref]')) el.removeAttribute('data-twmcp-ref');
+
+    const choices = [];
+    const inputs = [];
+    const seen = new Set();
+    let cIdx = 0;
+    let iIdx = 0;
+
+    for (const sel of CHOICE_SELECTORS) {
+      for (const el of scope.querySelectorAll(sel)) {
+        if (seen.has(el)) continue;
+        seen.add(el);
+        if (choices.length >= 120) break;
+        if (!isElementVisible(el)) continue;
+        if (el.closest('#ui-bar, tw-sidebar, .tw-sidebar, #menu, .menu, #backstage, [data-cb-backstage], footer, header, #spinner, .warnings, [data-cb-restart]')) continue;
+        if (el.hasAttribute('data-twmcp-skip')) continue;
+        if (['input', 'textarea', 'select'].includes(el.tagName.toLowerCase())) continue;
+        const ref = 'c' + (++cIdx);
+        el.setAttribute('data-twmcp-ref', ref);
+        const d = describeChoice(el, ref);
+        if (!d.label && d.kind !== 'button') continue;
+        choices.push(d);
+      }
+    }
+
+    const inputSel = 'input:not([type="hidden"]):not([type="button"]):not([type="submit"]), textarea, select';
+    for (const el of scope.querySelectorAll(inputSel)) {
+      if (seen.has(el)) continue;
+      seen.add(el);
+      if (inputs.length >= 40) break;
+      if (!isElementVisible(el)) continue;
+      const ref = 'i' + (++iIdx);
+      el.setAttribute('data-twmcp-ref', ref);
+      inputs.push(describeInput(el, ref));
+    }
+
+    return { choices, inputs };
+  };
+
+  // ---------------------------------------------------------------------------
+  // Variables
+  // ---------------------------------------------------------------------------
+
+  const sanitize = (value, depth, seen) => {
+    const d = depth || 0;
+    if (value === null || value === undefined) return value === undefined ? null : null;
+    const t = typeof value;
+    if (t === 'number' || t === 'boolean') return value;
+    if (t === 'string') return value.length > 400 ? value.slice(0, 400) + '…' : value;
+    if (t === 'function') return '[function]';
+    if (t === 'bigint') return String(value);
+    if (d >= 4) return '[depth]';
+    if (t === 'object') {
+      if (seen.has(value)) return '[cycle]';
+      seen.add(value);
+      let result;
+      if (Array.isArray(value)) {
+        result = value.slice(0, 80).map((v) => sanitize(v, d + 1, seen));
+        if (value.length > 80) result.push('… +' + (value.length - 80) + ' more');
+      } else {
+        result = {};
+        let n = 0;
+        for (const k of Object.keys(value)) {
+          if (n++ >= 80) { result['…'] = 'more keys omitted'; break; }
+          try { result[k] = sanitize(value[k], d + 1, seen); } catch (_) { result[k] = '[unreadable]'; }
+        }
+      }
+      seen.delete(value);
+      return result;
+    }
+    return String(value);
+  };
+
+  const readVariables = (fmt) => {
+    const g = window;
+    const tryObj = (obj) => {
+      if (!obj || typeof obj !== 'object') return null;
+      try { return sanitize(obj, 0, new Set()); } catch (_) { return null; }
+    };
+    try {
+      if (fmt === 'sugarcube') {
+        const S = sugar() || g;
+        if (S.State && S.State.variables) return tryObj(S.State.variables);
+        if (S.state && S.state.variables) return tryObj(S.state.variables);
+      }
+      if (fmt === 'harlowe') {
+        const st = g.Harlowe && g.Harlowe.API_ACCESS && g.Harlowe.API_ACCESS.STATE;
+        if (st && st.variables) return tryObj(st.variables);
+        const alt = g.State || (g.Harlowe && g.Harlowe.State);
+        if (alt && alt.variables) return tryObj(alt.variables);
+      }
+      if (fmt === 'snowman') {
+        const s = (g.story && g.story.state) || g.state;
+        if (s && typeof s === 'object') {
+          try {
+            if (Object.keys(s).length) return tryObj(s);
+          } catch (_) { /* ignore */ }
+        }
+      }
+      if (fmt === 'chapbook') {
+        const st = g.engine && g.engine.state;
+        if (!st) return null;
+        if (typeof st.saveToObject === 'function') {
+          try {
+            const o = st.saveToObject();
+            if (o && typeof o === 'object' && Object.keys(o).length) return tryObj(o);
+          } catch (_) { /* ignore */ }
+        }
+        if (st.variables && typeof st.variables === 'object') return tryObj(st.variables);
+        if (typeof st.varNames === 'function') {
+          try {
+            const names = st.varNames();
+            if (Array.isArray(names) && names.length) {
+              const out = {};
+              for (const n of names) {
+                try { out[n] = st.get(n); } catch (_) { out[n] = null; }
+              }
+              return tryObj(out);
+            }
+          } catch (_) { /* ignore */ }
+        }
+      }
+    } catch (_) { /* ignore */ }
+    return null;
+  };
+
+  // ---------------------------------------------------------------------------
+  // Engine helpers
+  // ---------------------------------------------------------------------------
+
+  const engineBusy = () => {
+    try {
+      const E = window.Engine || (sugar() && sugar().Engine);
+      if (!E) return false;
+      if (typeof E.isPlaying === 'function') return !!E.isPlaying();
+      const st = E.state;
+      if (typeof st === 'string') return st !== 'idle' && st !== '';
+      if (st && typeof st === 'object') return false;
+    } catch (_) { /* ignore */ }
+    return false;
+  };
+
+  const engineState = () => {
+    try {
+      const E = window.Engine || (sugar() && sugar().Engine);
+      if (!E) return null;
+      const st = E.state;
+      if (typeof st === 'string') return st;
+      if (typeof E.isPlaying === 'function') return E.isPlaying() ? 'playing' : 'idle';
+    } catch (_) { /* ignore */ }
+    return null;
+  };
+
+  // ---------------------------------------------------------------------------
+  // Public API
+  // ---------------------------------------------------------------------------
+
+  const waitStable = async (opts) => {
+    const o = opts || {};
+    const timeout = Math.max(200, Math.min(o.timeout || 15000, 120000));
+    const quiet = Math.max(30, Math.min(o.quiet || 120, 2000));
+    const t0 = Date.now();
+
+    // 1. Wait out format-declared engine busy states (bounded).
+    while (Date.now() - t0 < timeout * 0.6 && engineBusy()) await sleep(25);
+
+    // 2. Wait for DOM mutation quiet.
+    await new Promise((resolve) => {
+      let timer = null;
+      let hard = null;
+      const obs = new MutationObserver(() => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(done, quiet);
+      });
+      const done = () => {
+        try { obs.disconnect(); } catch (_) { /* ignore */ }
+        if (timer) clearTimeout(timer);
+        if (hard) clearTimeout(hard);
+        resolve();
+      };
+      try {
+        obs.observe(document.body || document.documentElement, {
+          subtree: true, childList: true, characterData: true, attributes: true
+        });
+      } catch (_) { /* ignore */ }
+      timer = setTimeout(done, quiet);
+      hard = setTimeout(done, timeout);
+    });
+
+    // 3. Two frames to let layout/style settle.
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+    return { ok: true, elapsed: Date.now() - t0, engineState: engineState(), busy: engineBusy() };
+  };
+
+  const observe = (opts) => {
+    const o = opts || {};
+    const fmtInfo = detectFormat();
+    const root = getPassageRoot();
+    const maxChars = Math.max(200, Math.min(o.maxTextChars || 12000, 200000));
+    const text = root ? htmlToMarkdown(root, maxChars) : '';
+    const interactives = collectInteractives(root);
+    const meta = storyMeta();
+
+    let variables = null;
+    if (o.includeVariables !== false) variables = readVariables(fmtInfo.name);
+
+    let status = null;
+    if (o.includeStatus !== false) {
+      const parts = [];
+      for (const sel of ['#story-caption', '.story-caption', 'tw-header', 'tw-footer', '#custom-caption', '.status-bar']) {
+        const el = document.querySelector(sel);
+        if (el && isElementVisible(el)) {
+          const t = normalize(el.innerText || '');
+          if (t) parts.push(t);
+        }
+      }
+      if (parts.length) {
+        status = parts.join('\n---\n');
+        if (status.length > 1500) status = status.slice(0, 1500) + '…';
+      }
+    }
+
+    return {
+      ok: true,
+      passage: readPassageName(fmtInfo.name),
+      format: fmtInfo.name,
+      formatVersion: fmtInfo.version,
+      story: meta,
+      url: location.href,
+      title: document.title || null,
+      text,
+      choices: interactives.choices,
+      inputs: interactives.inputs,
+      status,
+      variables,
+      engineState: engineState(),
+      hasPassageRoot: !!root,
+      readyState: document.readyState
+    };
+  };
+
+  const clickRef = (ref) => {
+    const el = document.querySelector('[data-twmcp-ref="' + String(ref).replace(/["\\]/g, '') + '"]');
+    if (!el) return { ok: false, error: 'stale-ref', message: 'Ref ' + ref + ' no longer exists; call observe again.' };
+    try {
+      el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    } catch (_) { /* ignore */ }
+    try {
+      el.focus({ preventScroll: true });
+    } catch (_) { /* ignore */ }
+    try {
+      el.click();
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: 'click-failed', message: String(e && e.message || e) };
+    }
+  };
+
+  const setValueNative = (el, value) => {
+    const proto = el instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : el instanceof HTMLSelectElement
+        ? HTMLSelectElement.prototype
+        : HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && desc.set) desc.set.call(el, value);
+    else el.value = value;
+  };
+
+  const fillRef = (ref, value) => {
+    const el = document.querySelector('[data-twmcp-ref="' + String(ref).replace(/["\\]/g, '') + '"]');
+    if (!el) return { ok: false, error: 'stale-ref' };
+    try {
+      el.focus({ preventScroll: true });
+      setValueNative(el, value == null ? '' : String(value));
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: 'fill-failed', message: String(e && e.message || e) };
+    }
+  };
+
+  const pressKey = (key) => {
+    try {
+      const target = document.activeElement || document.body;
+      target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+      target.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true, cancelable: true }));
+      return { ok: true, target: target.tagName || null };
+    } catch (e) {
+      return { ok: false, error: 'press-failed', message: String(e && e.message || e) };
+    }
+  };
+
+  const restart = () => {
+    try {
+      const E = window.Engine || (sugar() && sugar().Engine);
+      if (E && typeof E.restart === 'function') { E.restart(); return { ok: true, method: 'engine' }; }
+      location.reload();
+      return { ok: true, method: 'reload' };
+    } catch (e) {
+      return { ok: false, error: 'restart-failed', message: String(e && e.message || e) };
+    }
+  };
+
+  const back = () => {
+    try {
+      const E = window.Engine || (sugar() && sugar().Engine);
+      if (E && typeof E.backward === 'function') {
+        const moved = E.backward();
+        return { ok: true, moved: moved !== false, method: 'sugarcube' };
+      }
+      if (E && typeof E.back === 'function') {
+        const moved = E.back();
+        return { ok: true, moved: moved !== false, method: 'engine-back' };
+      }
+      // Harlowe renders player-facing undo/redo controls inside <tw-sidebar>.
+      const undo = document.querySelector('tw-sidebar .undo, tw-sidebar tw-icon.undo, tw-icon.undo');
+      if (undo && isElementVisible(undo)) {
+        undo.click();
+        return { ok: true, moved: true, method: 'harlowe-undo' };
+      }
+      return { ok: false, error: 'unsupported', message: 'This story format has no backward navigation API.' };
+    } catch (e) {
+      return { ok: false, error: 'back-failed', message: String(e && e.message || e) };
+    }
+  };
+
+  const goTo = (passageName) => {
+    try {
+      if (!passageName) return { ok: false, error: 'missing-passage' };
+      const S = sugar() || window;
+      const E = window.Engine || (S && S.Engine);
+      if (E && typeof E.play === 'function' && (S.State || S.Story)) {
+        E.play(String(passageName));
+        return { ok: true, method: 'engine' };
+      }
+      const storyObj = window.story;
+      if (storyObj && typeof storyObj.show === 'function') {
+        storyObj.show(String(passageName));
+        return { ok: true, method: 'snowman-show' };
+      }
+      if (storyObj && typeof storyObj.go === 'function') {
+        storyObj.go(String(passageName));
+        return { ok: true, method: 'snowman-go' };
+      }
+      if (window.Engine && typeof window.Engine.goTo === 'function') {
+        window.Engine.goTo(String(passageName));
+        return { ok: true, method: 'harlowe' };
+      }
+      return { ok: false, error: 'unsupported' };
+    } catch (e) {
+      return { ok: false, error: 'goto-failed', message: String(e && e.message || e) };
+    }
+  };
+
+  const snapshot = () => {
+    try {
+      const S = sugar() || window;
+      if (S.Save && S.Save.base64 && typeof S.Save.base64.save === 'function') {
+        return { ok: true, data: S.Save.base64.save(), method: 'sugarcube-base64' };
+      }
+      if (S.Save && typeof S.Save.serialize === 'function') {
+        return { ok: true, data: S.Save.serialize(), method: 'sugarcube-serialize' };
+      }
+      const g = window;
+      if (g.engine && g.engine.state && typeof g.engine.state.saveToObject === 'function') {
+        return { ok: true, data: JSON.stringify({ fmt: 'chapbook', vars: g.engine.state.saveToObject() }), method: 'chapbook-state' };
+      }
+      if (g.story && g.story.state && typeof g.story.state === 'object') {
+        const vars = {};
+        for (const k of Object.keys(g.story.state)) vars[k] = g.story.state[k];
+        return {
+          ok: true,
+          data: JSON.stringify({ fmt: 'snowman', vars, passage: g.passage && g.passage.name ? g.passage.name : null }),
+          method: 'snowman-state'
+        };
+      }
+      return { ok: false, error: 'unsupported', message: 'No snapshot API for this story format.' };
+    } catch (e) {
+      return { ok: false, error: 'snapshot-failed', message: String(e && e.message || e) };
+    }
+  };
+
+  const restore = async (data) => {
+    try {
+      const S = sugar() || window;
+      if (!data) return { ok: false, error: 'missing-data' };
+      if (S.Save && S.Save.base64 && typeof S.Save.base64.load === 'function') {
+        // SugarCube v2.37+: returns a Promise and rejects while the engine is in the Init state.
+        await S.Save.base64.load(String(data));
+        return { ok: true, method: 'sugarcube-base64' };
+      }
+      if (S.Save && typeof S.Save.deserialize === 'function') {
+        // SugarCube v2.21–v2.36: deserialize() both decodes and loads the save; null means failure.
+        const loaded = S.Save.deserialize(String(data));
+        if (loaded === null || loaded === false) {
+          return { ok: false, error: 'restore-failed', message: 'Save.deserialize() returned null (corrupt or incompatible save data).' };
+        }
+        return { ok: true, method: 'sugarcube-deserialize' };
+      }
+      const g = window;
+      let parsed = null;
+      try {
+        parsed = JSON.parse(String(data));
+      } catch (_) {
+        parsed = null;
+      }
+      if (!parsed || typeof parsed !== 'object') {
+        return { ok: false, error: 'unsupported', message: 'No restore API for this story format.' };
+      }
+      if (parsed.fmt === 'chapbook' && g.engine && g.engine.state && typeof g.engine.state.restoreFromObject === 'function') {
+        g.engine.state.restoreFromObject(parsed.vars);
+        return { ok: true, method: 'chapbook-state' };
+      }
+      if (parsed.fmt === 'snowman' && g.story && g.story.state) {
+        for (const k of Object.keys(g.story.state)) delete g.story.state[k];
+        Object.assign(g.story.state, parsed.vars || {});
+        const nav = typeof g.story.show === 'function' ? g.story.show : g.story.go;
+        if (parsed.passage && typeof nav === 'function') nav.call(g.story, String(parsed.passage));
+        return { ok: true, method: 'snowman-state' };
+      }
+      return { ok: false, error: 'unsupported', message: 'No restore API for this story format.' };
+    } catch (e) {
+      return { ok: false, error: 'restore-failed', message: String(e && e.message || e) };
+    }
+  };
+
+  const seed = (value) => {
+    try {
+      const S = sugar() || window;
+      const prng = S.State && S.State.prng;
+      if (!prng || typeof prng.init !== 'function') {
+        return { ok: false, error: 'unsupported', message: 'No seedable PRNG for this story format.' };
+      }
+      prng.init(String(value));
+      const E = window.Engine || (S && S.Engine);
+      if (E && typeof E.restart === 'function') E.restart();
+      return { ok: true, seed: String(value) };
+    } catch (e) {
+      return { ok: false, error: 'seed-failed', message: String(e && e.message || e) };
+    }
+  };
+
+  const ping = () => ({
+    ok: true,
+    ready: document.readyState,
+    format: detectFormat(),
+    hasSugarCube: !!window.SugarCube,
+    hasEngine: !!window.Engine,
+    hasState: !!window.State,
+    hasStory: !!window.story,
+    hasHarlowe: !!window.Harlowe,
+    hasChapbookEngine: !!(window.engine && window.engine.state)
+  });
+
+  window.__twineMCP = {
+    version: 0.1,
+    ping,
+    observe,
+    waitStable,
+    clickRef,
+    fillRef,
+    pressKey,
+    restart,
+    back,
+    goTo,
+    snapshot,
+    restore,
+    seed,
+    meta: storyMeta,
+    detectFormat
+  };
+})();

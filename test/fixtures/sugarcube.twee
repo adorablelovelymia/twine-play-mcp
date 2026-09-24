@@ -1,0 +1,30 @@
+:: StoryTitle
+MCP SugarCube Fixture
+
+:: StoryData
+{
+  "ifid": "a1b2c3d4-1111-4111-8111-111111111111",
+  "format": "SugarCube",
+  "format-version": "2.30.0",
+  "start": "Start"
+}
+
+:: Start
+You are in a small room. A mirror hangs on the wall.
+<<set $seen to true>>
+<<set $coins to 7>>
+[[Open the door->Hall]]
+[[Look in the mirror->Mirror]]
+
+:: Hall
+The hall is long. You walk carefully.
+[[Continue->End]]
+[[Back->Start]]
+
+:: Mirror
+Your reflection blinks first.
+<<set $coins to $coins + 5>>
+[[Leave->Start]]
+
+:: End
+You made it out. The end.

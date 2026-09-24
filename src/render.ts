@@ -1,0 +1,115 @@
+import type { GameSession, Observation } from './session.js';
+
+const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
+
+export interface RenderOptions {
+  step?: number;
+  consoleCount?: number;
+  sinceLast?: boolean;
+  previous?: Observation | null;
+}
+
+export function renderObservation(obs: Observation, opts: RenderOptions = {}): string {
+  const lines: string[] = [];
+
+  const headerBits = [
+    obs.format + (obs.formatVersion ? ` ${obs.formatVersion}` : ''),
+    `step ${opts.step ?? 0}`,
+    obs.engineState ? `engine=${obs.engineState}` : null,
+    `passage: ${obs.passage ?? '?'}`
+  ].filter(Boolean);
+  lines.push(`[${headerBits.join(' · ')}]`);
+
+  const unchanged =
+    opts.sinceLast &&
+    opts.previous &&
+    opts.previous.text === obs.text &&
+    opts.previous.passage === obs.passage &&
+    JSON.stringify(opts.previous.choices.map((c) => c.label)) === JSON.stringify(obs.choices.map((c) => c.label));
+  if (unchanged) {
+    lines.push('(no change since last observation)');
+  } else {
+    lines.push('');
+    lines.push(obs.text || '(empty passage)');
+  }
+
+  lines.push('');
+  if (obs.choices.length) {
+    lines.push(`Choices (${obs.choices.length}):`);
+    obs.choices.forEach((c, i) => {
+      const bits = [`${i + 1}. ${oneLine(c.label)}`];
+      if (c.target) bits.push(`-> ${c.target}`);
+      if (c.external) bits.push('[external]');
+      if (c.disabled) bits.push('(disabled)');
+      lines.push('  ' + bits.join(' '));
+    });
+  } else {
+    lines.push('Choices (0): no visible choices.');
+    if (obs.inputs.length) lines.push('  -> fill the inputs and/or press a key, then observe again.');
+    else lines.push('  -> try wait, or this may be an ending / dead end.');
+  }
+
+  if (obs.inputs.length) {
+    lines.push('');
+    lines.push(`Inputs (${obs.inputs.length}):`);
+    for (const inp of obs.inputs) {
+      const bits = [`${inp.ref} ${inp.kind}`];
+      if (inp.name) bits.push(`name="${inp.name}"`);
+      if (inp.value) bits.push(`value="${inp.value.slice(0, 60)}"`);
+      if (inp.placeholder) bits.push(`placeholder="${inp.placeholder.slice(0, 60)}"`);
+      if (inp.options?.length) bits.push(`options=[${inp.options.map((o) => o.label).join(' | ').slice(0, 200)}]`);
+      lines.push('  ' + bits.join(' '));
+    }
+  }
+
+  if (obs.status) {
+    lines.push('');
+    lines.push('Status:');
+    lines.push(obs.status);
+  }
+
+  if (obs.variables && typeof obs.variables === 'object') {
+    let json: string;
+    try {
+      json = JSON.stringify(obs.variables);
+    } catch {
+      json = '(unserializable)';
+    }
+    if (json && json !== '{}' && json !== 'null') {
+      const capped = json.length > 2000 ? json.slice(0, 2000) + ` … [${json.length} chars total]` : json;
+      lines.push('');
+      lines.push('Variables: ' + capped);
+    }
+  }
+
+  if (opts.consoleCount) {
+    lines.push('');
+    lines.push(`⚠ ${opts.consoleCount} console/network issue(s) captured — call get_console_errors for details.`);
+  }
+
+  return lines.join('\n');
+}
+
+export function renderOpen(session: GameSession, obs: Observation): string {
+  const story = obs.story ?? {};
+  const lines = [
+    `Opened game "${session.id}" (${session.source})`,
+    `Story: ${story.title ?? obs.title ?? '(unknown)'} · Format: ${story.format ?? obs.format}${story.formatVersion ? ' ' + story.formatVersion : ''}` +
+      (story.ifid ? ` · ifid: ${story.ifid}` : ''),
+    session.seed ? `PRNG seed: ${session.seed}` : null,
+    session.server ? `Served from: ${session.server.baseUrl}` : `URL: ${session.entryUrl}`,
+    '',
+    renderObservation(obs, { step: 0 })
+  ].filter((l) => l !== null);
+  return lines.join('\n');
+}
+
+export function renderConsole(entries: Array<{ type: string; text: string; location?: string; at: number }>): string {
+  if (!entries.length) return 'No console errors or warnings captured.';
+  return entries
+    .map((e, i) => {
+      const loc = e.location ? ` @ ${e.location}` : '';
+      return `${i + 1}. [${e.type}] ${oneLine(e.text)}${loc}`;
+    })
+    .join('\n');
+}
