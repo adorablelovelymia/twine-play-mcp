@@ -377,16 +377,42 @@ export class SessionManager {
       };
     }
 
-    const selector = `[data-twmcp-ref="${picked.ref}"]`;
-    let method = 'mouse';
-    try {
-      await session.page.locator(selector).click({ timeout: 2000 });
-    } catch {
-      const res = await this.bridge<BridgeResult>(session, 'clickRef', picked.ref);
-      if (!res.ok) {
-        return { ok: false, error: res.error ?? 'click-failed', message: res.message, observation: await this.observe(session) };
+    // Click with one automatic retry: dynamic passages can re-render between
+    // observe and click, which invalidates the choice ref (common in timed games).
+    let method: string | null = null;
+    let retried = false;
+    for (let attempt = 0; attempt < 2 && !method; attempt++) {
+      try {
+        await session.page.locator(`[data-twmcp-ref="${picked.ref}"]`).click({ timeout: 2000 });
+        method = 'mouse';
+        break;
+      } catch {
+        const res = await this.bridge<BridgeResult>(session, 'clickRef', picked.ref);
+        if (res.ok) {
+          method = 'js';
+          break;
+        }
       }
-      method = 'js';
+      if (attempt === 0) {
+        const fresh = await this.observe(session);
+        const needle = normalizeLabel(picked.label);
+        const again =
+          fresh.choices.find((c) => !c.disabled && normalizeLabel(c.label) === needle) ??
+          fresh.choices.find((c) => !c.disabled && normalizeLabel(c.label).includes(needle));
+        if (!again) {
+          return {
+            ok: false,
+            error: 'stale-ref',
+            message: `Choice "${picked.label}" disappeared before it could be clicked.`,
+            observation: fresh
+          };
+        }
+        picked = again;
+        retried = true;
+      }
+    }
+    if (!method) {
+      return { ok: false, error: 'click-failed', message: `Could not click "${picked.label}".`, observation: await this.observe(session) };
     }
 
     await this.waitStable(session);
@@ -399,7 +425,7 @@ export class SessionManager {
       target: picked.target,
       at: Date.now()
     });
-    return { ok: true, clicked: { ...picked, kind: `${picked.kind}/${method}` }, observation };
+    return { ok: true, clicked: { ...picked, kind: `${picked.kind}/${method}${retried ? '/retry' : ''}` }, observation };
   }
 
   async interact(
