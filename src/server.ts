@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { SessionManager, type ChoiceInfo, type DialogInfo, type GameSession, type Observation } from './session.js';
 import { renderConsole, renderObservation, renderOpen } from './render.js';
+import { forgetLiveView, liveViewUrl, openInBrowser } from './live-view.js';
 
 type TextResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 
@@ -780,6 +781,41 @@ export function buildServer(manager: SessionManager): McpServer {
   );
 
   server.registerTool(
+    'live_view',
+    {
+      title: 'Open a live view of the game page',
+      description:
+        'Give the user eyes on the actual page the agent is controlling: starts a tiny local web server (once per MCP process) that streams ' +
+        'JPEG screenshots of the real Playwright tab (~1/s) together with passage, step, engine state, recent actions and the passage text. ' +
+        'Returns a URL like http://127.0.0.1:4571/v/game_abc — open it in any browser (works with headless games too). ' +
+        'Frames are captured only while someone is watching. Set open:true to also launch the URL in the default browser.',
+      inputSchema: {
+        game_id: gameId,
+        open: z.boolean().optional().describe('Also open the URL in the default browser on this machine (default false).')
+      }
+    },
+    async ({ game_id, open }) => {
+      try {
+        const session = manager.get(game_id);
+        const url = await liveViewUrl(manager, session);
+        const opened = open ? openInBrowser(url) : false;
+        return text(
+          `Live view for ${session.id}: ${url}\n` +
+            (open
+              ? opened
+                ? 'Opened in the default browser. '
+                : 'Could not launch a browser (no xdg-open/open?) — open the URL manually. '
+              : '') +
+            `Refreshes ~1/s and shows passage/step/journal. Attaches to the running tab; nothing needs restarting. ` +
+            `Stop by closing the game; the server itself shuts down with the MCP.`
+        );
+      } catch (err) {
+        return errorText('live-view-failed', String((err as Error)?.message ?? err));
+      }
+    }
+  );
+
+  server.registerTool(
     'close_game',
     {
       title: 'Close a game',
@@ -789,6 +825,7 @@ export function buildServer(manager: SessionManager): McpServer {
     async ({ game_id }) => {
       try {
         const ok = await manager.close(game_id);
+        if (ok) forgetLiveView(game_id);
         return text(ok ? `Closed ${game_id}.` : `No such game: ${game_id}.`, !ok);
       } catch (err) {
         return errorText('close-failed', String((err as Error)?.message ?? err));

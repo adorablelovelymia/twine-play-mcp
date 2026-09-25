@@ -83,6 +83,8 @@ Environment variables:
 | Variable | Purpose |
 | --- | --- |
 | `TWMCP_CHROME_PATH` | Chrome executable if `channel: 'chrome'` cannot find it |
+| `TWMCP_DOWNLOAD_DIR` | Folder where browser downloads are captured (default `~/.cache/twine-play-mcp/downloads`) |
+| `TWMCP_VIEW_PORT` / `TWMCP_VIEW_HOST` | Live-view server port (default `4571`, auto-increments if busy) and bind host (default `127.0.0.1`) |
 
 ## Tools
 
@@ -104,9 +106,22 @@ Environment variables:
 | `restart` | Restart from the beginning, optionally reseeding the PRNG |
 | `save_state` / `load_state` | Named in-session snapshots for branch exploration |
 | `screenshot` | PNG of the viewport (canvas/visual games, visual QA); pass `path` to save to disk |
+| `live_view` | Give the user eyes on the real page: local URL streaming JPEG frames (~1/s) of the actual Playwright tab + passage/step/journal; works headless; `open:true` launches the default browser |
 | `get_console_errors` | JS exceptions, console errors and HTTP failures captured from the page |
 | `get_journal` | Action history: passages visited, choices taken, coverage counts |
 | `list_games` / `close_game` | Session management |
+
+### Watching the page (live view)
+
+`live_view(game_id)` starts a tiny local server (once per MCP process, port 4571+) and returns a URL
+like `http://127.0.0.1:4571/v/game_abc`. Open it in any browser (or pass `open: true`) to watch the
+**actual tab the agent is driving** — a JPEG frame about once per second, plus passage, step, engine
+state, recent actions and the passage text. It works with headless games, frames are captured only
+while somebody is watching, and closing the game stops it. For a raw browser window instead, open the
+game with `headless: false` (`open_game`).
+
+Handy combo: if your client can show a web page in a side pane (e.g. OpenCode's Review pane /
+`browser.tabs.open`), point it at the live-view URL and you can follow along while the agent plays.
 
 ### Agent ergonomics
 
@@ -214,6 +229,8 @@ adding a new adapter.
       character creation)
 - [x] M4: file workflows both ways — `upload_file` for mods/saves, `download_file` + `list_downloads`
       for a persistent browser download folder (no temp-folder copying)
+- [x] M5: live view — watch the real page in any browser (~1 fps frames + passage/step/journal);
+      headed mode via `open_game(headless: false)`
 - [ ] M3: `click_at` for canvas games, spoiler-gated story-map analysis, npm packaging
 
 ## Safety notes
@@ -226,7 +243,9 @@ adding a new adapter.
 ## 中文速览
 
 这是一个让 AI agent 游玩 / 测试 Twine 文字游戏的 MCP 服务：无头 Chrome + 页面桥，
-提供观察、选项点击、变量读取、存档回溯、截图、控制台 QA 等 13 个工具。
+提供观察、选项点击、变量读取、存档回溯、截图、控制台 QA 等 22 个工具。
 本地游戏会通过内置静态服务器以 `http://127.0.0.1` 打开（保证存档可用），
 支持 SugarCube 原生 API，其余格式走通用 DOM 兜底。
+只看不猜：`live_view` 给你一个本地网址，用任意浏览器就能实时看到 AI 正在操作的真实页面；
+也可以 `open_game(headless: false)` 直接弹出浏览器窗口。
 配置方式见上方 OpenCode / Claude Desktop 片段。

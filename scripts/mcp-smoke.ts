@@ -139,11 +139,33 @@ try {
   }
   check('download_file copies a captured file by name', copyBytes > 100 && /Saved "/.test(copy), `${copyBytes} B`);
 
+  // Live view: the user can watch the actual page the agent is driving.
+  const lv = textOf(await client.callTool({ name: 'live_view', arguments: { game_id: gameId, open: false } }));
+  const lvUrl = lv.match(/http:\/\/127\.0\.0\.1:\d+\/v\/[A-Za-z0-9_-]+/)?.[0];
+  check('live_view returns a viewer URL', !!lvUrl, lv.split('\n')[0]?.slice(0, 100) ?? '');
+  let viewHtmlOk = false;
+  let frameBytes = 0;
+  if (lvUrl) {
+    const htmlRes = await fetch(lvUrl);
+    const html = await htmlRes.text();
+    viewHtmlOk = htmlRes.ok && html.includes(gameId!) && html.includes('/f/');
+    const frameRes = await fetch(lvUrl.replace('/v/', '/f/') + '.jpg');
+    frameBytes = Buffer.from(await frameRes.arrayBuffer()).length;
+  }
+  check('live view serves the viewer page and a JPEG frame', viewHtmlOk && frameBytes > 5000, `html ${viewHtmlOk ? 'ok' : 'bad'}, ${frameBytes} B jpeg`);
+
   const list = textOf(await client.callTool({ name: 'list_games', arguments: {} }));
   check('list_games works', list.includes(gameId!), list.split('\n')[0] ?? '');
 
   const close = textOf(await client.callTool({ name: 'close_game', arguments: { game_id: gameId } }));
   check('close_game works', /Closed/.test(close), close);
+
+  if (lvUrl) {
+    const after = await fetch(lvUrl)
+      .then((r) => r.status)
+      .catch(() => 0);
+    check('live view reports a closed game (404)', after === 404, `HTTP ${after}`);
+  }
 
   const listAfter = textOf(await client.callTool({ name: 'list_downloads', arguments: { limit: 10 } }));
   check('download folder persists after close_game', !!listedName && listAfter.includes(listedName), listAfter.split('\n')[0] ?? '');
