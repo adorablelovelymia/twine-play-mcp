@@ -95,6 +95,19 @@ try {
     `${badChoice.length} chars`
   );
 
+  // SugarCube sidebar: find_ui sees it, click_ui(ref) operates it, dialog is numbered.
+  const sidebar = textOf(await client.callTool({ name: 'find_ui', arguments: { game_id: gameId, text: 'SAVES' } }));
+  const saveRef = sidebar.match(/\[(u\d+)\]/)?.[1];
+  check('find_ui sees the sidebar (SAVES)', /Found [1-9]/.test(sidebar) && !!saveRef, sidebar.split('\n')[0] ?? '');
+  const opened = saveRef
+    ? textOf(await client.callTool({ name: 'click_ui', arguments: { game_id: gameId, ref: saveRef } }))
+    : '';
+  check(
+    'click_ui(ref) opens the sidebar dialog',
+    /Dialog buttons/.test(opened) && /Save Slot 1/.test(opened),
+    opened.split('\n').find((l) => l.startsWith('Dialog buttons'))?.slice(0, 120) ?? '(no dialog)'
+  );
+
   const list = textOf(await client.callTool({ name: 'list_games', arguments: {} }));
   check('list_games works', list.includes(gameId!), list.split('\n')[0] ?? '');
 

@@ -64,8 +64,13 @@ export function renderObservation(obs: Observation, opts: RenderOptions = {}): s
   }
 
   if (obs.ui?.length) {
+    const total = obs.uiTotal ?? obs.ui.length;
     lines.push('');
-    lines.push('UI: ' + obs.ui.map((u) => `${oneLine(u.label)} [${u.ref}]`).join(' · '));
+    lines.push(
+      'UI: ' +
+        obs.ui.map((u) => `${oneLine(u.label)} [${u.ref}]`).join(' · ') +
+        (total > obs.ui.length ? ` · … +${total - obs.ui.length} more (inspect_ui '#ui-bar')` : '')
+    );
   }
 
   if (obs.inputs.length) {

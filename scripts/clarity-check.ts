@@ -57,6 +57,11 @@ async function main() {
     /Inputs \(\d+-\d+ of \d+\)/.test(rendered) && /inputs_offset=/.test(rendered),
     rendered.match(/Inputs \([^\n]*/)?.[0] ?? '(missing)'
   );
+  check(
+    'sidebar listed in observation (always, no hiding)',
+    /^UI: \S/m.test(rendered) && /\[u\d+\]/.test(rendered),
+    (rendered.match(/^UI: .*/m)?.[0] ?? '(no UI line)').slice(0, 160)
+  );
 
   console.log('\n[4] find_ui on a SugarCube radio label');
   const f1 = await manager.findUi(session, { text: 'Jet black' });

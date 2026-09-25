@@ -66,6 +66,7 @@ function jsonPayload(session: GameSession, obs: Observation, action?: Record<str
     inputsTotal: obs.inputsTotal ?? obs.inputs.length,
     inputsOffset: obs.inputsOffset ?? 0,
     ui: obs.ui.map((u) => ({ ref: u.ref, label: u.label })),
+    uiTotal: obs.uiTotal ?? obs.ui.length,
     dialog: obs.dialog ? { title: obs.dialog.title, text: obs.dialog.text, buttons: obs.dialog.buttons } : null,
     status: obs.status,
     action: action ?? null

@@ -374,17 +374,27 @@
     }
 
     // 4. Ambient UI (sidebar, menu, ModLoader banner) exposed separately, not as passage choices.
-    for (const el of document.querySelectorAll('#ui-bar button, #ui-bar a, #startCaption button, #startCaption a, #story-caption button, #story-caption a, #startBannerModLoaderGui, #ui-bar-tray button')) {
-      if (seen.has(el) || !isElementVisible(el) || ui.length >= 25) continue;
+    //    Nothing visible is dropped: the cap only bounds pathological sidebars and the remainder
+    //    is still reported via uiTotal (rendered as "… +N more").
+    const UI_LIMIT = 120;
+    let uiTotal = 0;
+    for (const el of document.querySelectorAll(
+      '#ui-bar button, #ui-bar a, #ui-bar [role="button"], #ui-bar [onclick], ' +
+        '#startCaption button, #startCaption a, #story-caption button, #story-caption a, ' +
+        '#startBannerModLoaderGui, #ui-bar-tray button'
+    )) {
+      if (seen.has(el) || !isElementVisible(el)) continue;
       const label = normalize(el.innerText || el.value || el.getAttribute('aria-label') || el.title || '').slice(0, 60);
       if (!label) continue;
       seen.add(el);
+      uiTotal++;
+      if (ui.length >= UI_LIMIT) continue;
       const ref = 'u' + (++uIdx);
       el.setAttribute('data-twmcp-ref', ref);
       ui.push({ ref, label, kind: 'ui' });
     }
 
-    return { choices, inputs, ui, dialog, inputsTotal: inputsSeen, inputsOffset };
+    return { choices, inputs, ui, uiTotal, dialog, inputsTotal: inputsSeen, inputsOffset };
   };
 
   // ---------------------------------------------------------------------------
@@ -634,6 +644,7 @@
       inputsTotal: interactives.inputsTotal,
       inputsOffset: interactives.inputsOffset,
       ui: interactives.ui,
+      uiTotal: interactives.uiTotal,
       dialog: interactives.dialog,
       status,
       variables,

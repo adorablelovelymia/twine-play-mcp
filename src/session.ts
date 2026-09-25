@@ -55,6 +55,7 @@ export interface Observation {
   inputsTotal?: number;
   inputsOffset?: number;
   ui: UiButton[];
+  uiTotal?: number;
   dialog: DialogInfo | null;
   status: string | null;
   variables: unknown;
