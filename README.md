@@ -96,6 +96,8 @@ Environment variables:
 | `find_ui` | Find buttons/links/**labels**/inputs by visible text or input name; returns refs for `click_ui`/`interact`. The fastest way to reach radio/checkbox options (SugarCube macro labels) |
 | `click_ui` | Click dialogs, sidebar and menus (by ref / CSS selector / visible text), including `<label>`-based controls and iframes |
 | `upload_file` | Upload a local file into an `<input type=file>` (mod .zip, .save import) via trigger button or direct input, frame-aware |
+| `download_file` | Browser file control (any game): copy a captured download to a path — by `trigger_text`/`trigger_ref` (click the game's download button), by `name`/`index` from the download folder, or the newest file by default. The folder copy stays |
+| `list_downloads` | List files captured into the tool's persistent download folder (survives sessions/restarts), with name, size, time and absolute path |
 | `inspect_ui` | Inspect or discover UI panels outside the passage (mod GUIs, backstage); lists buttons/inputs and file inputs |
 | `get_variables` | Read story variables by dot path (`V.hairlength`), or a shallow top-level key summary; avoids dumping the whole variable state |
 | `back` | Undo one passage (SugarCube `Engine.backward`) |
@@ -173,9 +175,13 @@ Real games are not just passages and links. The MCP handles the awkward parts:
   consent checkbox (`interact`) and click `Enter` (`choose`).
 - **Iframes**: mod managers and dev panels often live in a child frame. `inspect_ui` discovers
   them (marked `[iframe]`), `click_ui` by text and `upload_file` search every frame.
-- **File workflows**: mod `.zip` import and save-file import go through `upload_file`, either
-  by clicking a trigger (`trigger_text` / `trigger_selector`, e.g. `#saves-import`) or by
-  pointing at an `<input type=file>` directly.
+- **File workflows**: uploads go through `upload_file` (mod `.zip`, save import) — by clicking a
+  trigger (`trigger_text` / `trigger_selector`, e.g. `#saves-import`) or pointing at an
+  `<input type=file>` directly. Downloads go the other way through a persistent download folder:
+  every browser download is captured there (`TWMCP_DOWNLOAD_DIR` overrides the location),
+  `list_downloads` shows the contents, and `download_file` copies one anywhere (`path`, default
+  `<cwd>/downloads/<name>`) — either by clicking the game's export button or by `name`/`index`
+  afterwards. No manual temp-folder copying, and files survive `close_game` and MCP restarts.
 - **DoL case study**: `test/fixtures` aside, `scripts/dol-mcp-test.ts` drives Degrees of
   Lewdity end to end — consent gate → importing `ModI18N.mod.zip` and
   `GameOriginalImagePack.mod.zip` through the in-game ModLoader GUI → page reload → importing
@@ -206,6 +212,8 @@ adding a new adapter.
 - [x] M4: agent ergonomics — input pagination + totals, `find_ui` label search, `get_variables`,
       `format:"json"`, compact errors (driven by a naive-agent playtest that stalled on DoL
       character creation)
+- [x] M4: file workflows both ways — `upload_file` for mods/saves, `download_file` + `list_downloads`
+      for a persistent browser download folder (no temp-folder copying)
 - [ ] M3: `click_at` for canvas games, spoiler-gated story-map analysis, npm packaging
 
 ## Safety notes

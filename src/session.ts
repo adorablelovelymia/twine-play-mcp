@@ -1,5 +1,6 @@
-import { chromium, type Browser, type BrowserContext, type Frame, type Page } from 'playwright-core';
+import { chromium, type Browser, type BrowserContext, type Download, type Frame, type Page } from 'playwright-core';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { serveGame, type GameServer } from './static-server.js';
@@ -93,6 +94,17 @@ export interface JournalEntry {
   at: number;
 }
 
+export interface DownloadRecord {
+  id: number;
+  download: Download;
+  suggested: string;
+  url: string;
+  at: number;
+  localPath: string | null;
+  saved: string | null;
+  promise: Promise<void> | null;
+}
+
 export interface GameSession {
   id: string;
   source: string;
@@ -101,6 +113,7 @@ export interface GameSession {
   context: BrowserContext;
   page: Page;
   console: ConsoleEntry[];
+  downloads: DownloadRecord[];
   lastObservation: Observation | null;
   snapshots: Map<string, { data: string; at: number }>;
   journal: JournalEntry[];
@@ -132,6 +145,17 @@ function bridgeSource(): string {
     }
   }
   throw new Error('bridge.js not found; the package is missing src/bridge/bridge.js');
+}
+
+/**
+ * Fixed folder where every browser download lands. Unlike Playwright's anonymous temp dir,
+ * it survives sessions and MCP restarts, so captured files can always be listed and exported.
+ * Override with TWMCP_DOWNLOAD_DIR.
+ */
+export function downloadsDir(): string {
+  const dir = process.env.TWMCP_DOWNLOAD_DIR ?? path.join(os.homedir(), '.cache', 'twine-play-mcp', 'downloads');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 const isUrl = (s: string) => /^https?:\/\//i.test(s);
@@ -230,6 +254,7 @@ export class SessionManager {
       context,
       page,
       console: [],
+      downloads: [],
       lastObservation: null,
       snapshots: new Map(),
       journal: [],
@@ -237,6 +262,7 @@ export class SessionManager {
       seed: opts.seed ?? null
     };
     this.attachConsole(session);
+    this.attachDownloads(session);
 
     await page.addInitScript({ content: bridgeSource() });
     try {
@@ -651,6 +677,202 @@ export class SessionManager {
       }
     }
     return { ok: false, error: 'no-file-input', message: lastErr || `No file input matched ${selector}` };
+  }
+
+  /**
+   * Every browser download is persisted into the tool's download folder (downloadsDir) as it
+   * arrives, so files keep their real names and survive close_game and MCP restarts.
+   */
+  private attachDownloads(session: GameSession): void {
+    session.page.on('download', (download) => {
+      const rec = this.trackDownload(session, download);
+      if (!rec.promise) rec.promise = this.persistDownload(rec).catch(() => undefined);
+    });
+  }
+
+  private trackDownload(session: GameSession, download: Download): DownloadRecord {
+    const rec: DownloadRecord = {
+      id: session.downloads.length + 1,
+      download,
+      suggested: download.suggestedFilename() || `download-${session.downloads.length + 1}.bin`,
+      url: download.url(),
+      at: Date.now(),
+      localPath: null,
+      saved: null,
+      promise: null
+    };
+    session.downloads.push(rec);
+    if (session.downloads.length > 50) session.downloads.shift();
+    return rec;
+  }
+
+  /** Save a captured download into the shared download folder (same-named files are overwritten). */
+  private async persistDownload(rec: DownloadRecord): Promise<void> {
+    const safe = (rec.suggested || `download-${rec.id}.bin`).replace(/[/\\]/g, '_').trim() || `download-${rec.id}.bin`;
+    const dest = path.join(downloadsDir(), safe);
+    await rec.download.saveAs(dest);
+    rec.localPath = dest;
+  }
+
+  /** List files captured in the download folder (newest first). Works across sessions and MCP restarts. */
+  async listDownloads(limit = 20): Promise<{
+    ok: boolean;
+    dir: string;
+    total: number;
+    files: Array<{ name: string; path: string; bytes: number; mtime: number }>;
+  }> {
+    const dir = downloadsDir();
+    let names: string[] = [];
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      names = [];
+    }
+    const files: Array<{ name: string; path: string; bytes: number; mtime: number }> = [];
+    for (const name of names) {
+      const p = path.join(dir, name);
+      try {
+        const st = fs.statSync(p);
+        if (st.isFile()) files.push({ name, path: p, bytes: st.size, mtime: st.mtimeMs });
+      } catch {
+        /* skip unreadable entries */
+      }
+    }
+    files.sort((a, b) => b.mtime - a.mtime);
+    const capped = Math.max(1, Math.min(limit, 200));
+    return { ok: true, dir, total: files.length, files: files.slice(0, capped) };
+  }
+
+  /** Where a copy should land: an explicit file, an existing directory, or <cwd>/downloads/<name>. */
+  private resolveDownloadPath(target: string | undefined, suggested: string): string {
+    const safeName = (suggested || 'download.bin').replace(/[/\\]/g, '_').trim() || 'download.bin';
+    if (!target) return path.resolve(process.cwd(), 'downloads', safeName);
+    const abs = path.resolve(target);
+    const looksLikeDir = /[/\\]$/.test(target) || (fs.existsSync(abs) && fs.statSync(abs).isDirectory());
+    return looksLikeDir ? path.join(abs, safeName) : abs;
+  }
+
+  /**
+   * Browser file control (any game). Either:
+   *  - click a download button (triggerRef/triggerText/triggerSelector) and take its file, or
+   *  - pick an already-captured file by `name` or 1-based `index` (newest first, from listDownloads), or
+   *  - with none of those, take the newest file in the download folder.
+   * Every captured file stays in the download folder; pass `path` to also copy it somewhere else.
+   */
+  async downloadFile(
+    session: GameSession,
+    opts: { path?: string; ref?: string; text?: string; selector?: string; name?: string; index?: number; timeoutMs?: number } = {}
+  ): Promise<{
+    ok: boolean;
+    error?: string;
+    message?: string;
+    path?: string;
+    source?: string;
+    filename?: string;
+    bytes?: number;
+    copied?: boolean;
+    overwrote?: boolean;
+    observation?: Observation;
+  }> {
+    const timeout = Math.max(1000, Math.min(opts.timeoutMs ?? 30000, 120000));
+    let sourcePath: string | null = null;
+    let filename = '';
+
+    if (opts.ref || opts.text || opts.selector) {
+      const dlPromise = session.page.waitForEvent('download', { timeout });
+      dlPromise.catch(() => undefined); // avoid an unhandled rejection when the click fails
+      const clicked = await this.clickUi(session, { ref: opts.ref, text: opts.text, selector: opts.selector });
+      if (!clicked.ok) {
+        return { ok: false, error: clicked.error ?? 'click-failed', message: clicked.message, observation: clicked.observation };
+      }
+      let dl: Download;
+      try {
+        dl = await dlPromise;
+      } catch {
+        return {
+          ok: false,
+          error: 'no-download',
+          message:
+            `Clicked "${clicked.label ?? 'trigger'}" but no download started within ${timeout}ms. ` +
+            'If that button only opens a sub-dialog, click the actual file button in this call.'
+        };
+      }
+      let rec = session.downloads.find((r) => r.download === dl);
+      if (!rec) rec = this.trackDownload(session, dl);
+      if (!rec.promise) rec.promise = this.persistDownload(rec).catch(() => undefined);
+      await rec.promise;
+      sourcePath = rec.localPath;
+      if (!sourcePath || !fs.existsSync(sourcePath)) {
+        return { ok: false, error: 'download-incomplete', message: `Download "${rec.suggested}" could not be stored in the download folder.` };
+      }
+      filename = rec.suggested || path.basename(sourcePath);
+    } else if (opts.name || opts.index != null) {
+      const listed = await this.listDownloads(200);
+      let hit: { name: string; path: string; bytes: number; mtime: number } | undefined;
+      if (opts.name) {
+        const needle = opts.name.toLowerCase();
+        hit =
+          listed.files.find((f) => f.name.toLowerCase() === needle) ??
+          listed.files.find((f) => f.name.toLowerCase().endsWith(needle)) ??
+          (listed.files.filter((f) => f.name.toLowerCase().includes(needle)).length === 1
+            ? listed.files.find((f) => f.name.toLowerCase().includes(needle))
+            : undefined);
+        if (!hit) {
+          return {
+            ok: false,
+            error: 'no-download',
+            message: `No file in the download folder matches "${opts.name}". Use list_downloads to see the ${listed.total} captured file(s).`
+          };
+        }
+      } else {
+        hit = listed.files[(opts.index ?? 1) - 1];
+        if (!hit) {
+          return { ok: false, error: 'no-download', message: `Index ${opts.index} is out of range 1..${listed.files.length}.` };
+        }
+      }
+      sourcePath = hit.path;
+      filename = hit.name;
+    } else {
+      const listed = await this.listDownloads(200);
+      const newest = listed.files[0];
+      if (!newest) {
+        return {
+          ok: false,
+          error: 'no-download',
+          message:
+            `The download folder is empty (${listed.dir}). Pass trigger_text/trigger_ref/trigger_selector to click a download button, ` +
+            'or trigger a download first and call download_file again.'
+        };
+      }
+      sourcePath = newest.path;
+      filename = newest.name;
+    }
+
+    let dest = sourcePath;
+    let overwrote = false;
+    let copied = false;
+    try {
+      if (opts.path) {
+        dest = this.resolveDownloadPath(opts.path, filename);
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        overwrote = fs.existsSync(dest);
+        if (path.resolve(dest) !== path.resolve(sourcePath)) {
+          fs.copyFileSync(sourcePath, dest);
+          copied = true;
+        }
+      }
+      const bytes = fs.statSync(dest).size;
+      session.journal.push({
+        step: session.step,
+        passage: session.lastObservation?.passage ?? null,
+        action: `(download:${path.basename(dest)})`,
+        target: dest,
+        at: Date.now()
+      });
+      return { ok: true, path: dest, source: sourcePath, filename, bytes, copied, overwrote, observation: await this.observe(session) };
+    } catch (err) {
+      return { ok: false, error: 'save-failed', message: String((err as Error)?.message ?? err) };
+    }
   }
 
   /** Find visible controls (buttons, links, labels, inputs) by text/name; refs work with click_ui/interact. */

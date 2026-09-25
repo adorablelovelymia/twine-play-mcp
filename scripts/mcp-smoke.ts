@@ -6,6 +6,7 @@
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import fs from 'node:fs';
 
 const GAME = process.env.TWMCP_GAME ?? '/home/qiyue/Projects/ts_ero_trap_dungeon-1.0.6/build/TS-Ero-Trap-Dungeon.html';
 const HERE = new URL('..', import.meta.url).pathname;
@@ -108,11 +109,44 @@ try {
     opened.split('\n').find((l) => l.startsWith('Dialog buttons'))?.slice(0, 120) ?? '(no dialog)'
   );
 
+  // Browser file control (generic): trigger a download, list the tool's download folder,
+  // then copy the captured file by name — no manual temp-folder handling.
+  const dlPath = '/tmp/opencode/twmcp-smoke-save.save';
+  const dl = textOf(
+    await client.callTool({ name: 'download_file', arguments: { game_id: gameId, trigger_text: 'Save', path: dlPath } })
+  );
+  let dlBytes = 0;
+  try {
+    dlBytes = fs.existsSync(dlPath) ? fs.statSync(dlPath).size : 0;
+  } catch {
+    dlBytes = 0;
+  }
+  check('download_file saves the export directly', dlBytes > 100 && /Saved ".*" ->/.test(dl), dl.split('\n')[0]?.slice(0, 120) ?? '');
+
+  const listOut = textOf(await client.callTool({ name: 'list_downloads', arguments: { limit: 5 } }));
+  const listedName = listOut.split('\n').find((l) => /\.save\b/.test(l))?.match(/^\s*\d+\.\s+(.+?)\s+—/)?.[1];
+  check('list_downloads shows captured files', /Download folder:/.test(listOut) && !!listedName, listedName ?? listOut.split('\n')[0] ?? '');
+
+  const copyPath = '/tmp/opencode/twmcp-smoke-copy.save';
+  const copy = listedName
+    ? textOf(await client.callTool({ name: 'download_file', arguments: { game_id: gameId, name: listedName, path: copyPath } }))
+    : '';
+  let copyBytes = 0;
+  try {
+    copyBytes = fs.existsSync(copyPath) ? fs.statSync(copyPath).size : 0;
+  } catch {
+    copyBytes = 0;
+  }
+  check('download_file copies a captured file by name', copyBytes > 100 && /Saved "/.test(copy), `${copyBytes} B`);
+
   const list = textOf(await client.callTool({ name: 'list_games', arguments: {} }));
   check('list_games works', list.includes(gameId!), list.split('\n')[0] ?? '');
 
   const close = textOf(await client.callTool({ name: 'close_game', arguments: { game_id: gameId } }));
   check('close_game works', /Closed/.test(close), close);
+
+  const listAfter = textOf(await client.callTool({ name: 'list_downloads', arguments: { limit: 10 } }));
+  check('download folder persists after close_game', !!listedName && listAfter.includes(listedName), listAfter.split('\n')[0] ?? '');
 
   await client.close();
 } catch (err) {

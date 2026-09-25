@@ -548,6 +548,93 @@ export function buildServer(manager: SessionManager): McpServer {
   );
 
   server.registerTool(
+    'download_file',
+    {
+      title: 'Save a captured browser download to a file',
+      description:
+        'Browser file control for any game: every download is captured into the tool\'s download folder (see list_downloads). ' +
+        'Three modes: (a) pass trigger_text/trigger_ref/trigger_selector to click the game\'s download button and take that file; ' +
+        '(b) pass name or index to take an already-captured file from the folder; (c) pass none of those to take the newest file in the folder. ' +
+        'Without `path` the file stays in the download folder (path = its location); with `path` (a file or a directory) a copy is placed there too. ' +
+        'Returns the path, size and the new observation.',
+      inputSchema: {
+        game_id: gameId,
+        path: z.string().optional().describe('Destination file or directory (default <cwd>/downloads/<name>).'),
+        trigger_text: z.string().optional().describe('Visible text of the button that starts the download (optional).'),
+        trigger_ref: z.string().optional().describe('Ref of the download button (alternative to trigger_text).'),
+        trigger_selector: z.string().optional().describe('CSS selector of the download button (alternative to trigger_text).'),
+        name: z.string().optional().describe('Name of an already-captured file from list_downloads (exact, suffix, or unique substring).'),
+        index: z.number().int().min(1).max(200).optional().describe('1-based index from list_downloads (newest first).'),
+        timeout_ms: z.number().int().min(1000).max(120000).optional().describe('How long to wait for the download after clicking (default 30000).'),
+        format: formatParam
+      }
+    },
+    async ({ game_id, path: dest, trigger_text, trigger_ref, trigger_selector, name, index, timeout_ms, format }) => {
+      try {
+        const session = manager.get(game_id);
+        const res = await manager.downloadFile(session, {
+          path: dest,
+          ref: trigger_ref,
+          text: trigger_text,
+          selector: trigger_selector,
+          name,
+          index,
+          timeoutMs: timeout_ms
+        });
+        if (!res.ok) {
+          return errResult(res.error ?? 'download-failed', res.message, {
+            hint:
+              res.error === 'no-download'
+                ? 'Run list_downloads to see captured files, or pass trigger_text/trigger_ref to click the game\'s download button.'
+                : 'Check the file name/index (list_downloads) or the trigger.',
+            passage: session.lastObservation?.passage ?? null
+          });
+        }
+        const prefix = `Saved "${res.filename ?? 'file'}" -> ${res.path} (${res.bytes ?? 0} B${res.copied ? ', copied' : ''}${res.overwrote ? ', overwrote existing file' : ''})`;
+        return observationResult(session, res.observation!, {
+          format,
+          prefix,
+          action: { path: res.path ?? null, source: res.source ?? null, filename: res.filename ?? null, bytes: res.bytes ?? 0, copied: !!res.copied }
+        });
+      } catch (err) {
+        return errorText('download-failed', String((err as Error)?.message ?? err));
+      }
+    }
+  );
+
+  server.registerTool(
+    'list_downloads',
+    {
+      title: 'List captured browser downloads',
+      description:
+        'List files captured from the browser into the tool\'s download folder (any game; the folder persists across sessions and MCP restarts). ' +
+        'Use download_file(name|index, path) to copy one anywhere. Shows name, size, capture time and the absolute folder path.',
+      inputSchema: {
+        limit: z.number().int().min(1).max(200).optional().describe('Max files to list (default 20, newest first).')
+      }
+    },
+    async ({ limit }) => {
+      try {
+        const res = await manager.listDownloads(limit ?? 20);
+        if (!res.files.length) {
+          return text(`Download folder: ${res.dir}\n(empty — trigger a download first, e.g. the game's save/export button)`);
+        }
+        const lines = [
+          `Download folder: ${res.dir} (${res.total} file${res.total === 1 ? '' : 's'}, newest first${res.total > res.files.length ? `, showing ${res.files.length}` : ''}):`
+        ];
+        res.files.forEach((f, i) => {
+          const when = new Date(f.mtime).toISOString().replace('T', ' ').slice(0, 16);
+          lines.push(`  ${i + 1}. ${f.name} — ${f.bytes} B — ${when}`);
+        });
+        lines.push('Use download_file(name=..., path=...) to copy one anywhere.');
+        return text(lines.join('\n'));
+      } catch (err) {
+        return errorText('list-downloads-failed', String((err as Error)?.message ?? err));
+      }
+    }
+  );
+
+  server.registerTool(
     'inspect_ui',
     {
       title: 'Inspect a UI panel',
