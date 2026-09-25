@@ -271,7 +271,17 @@
     return base;
   };
 
-  const collectInteractives = (root) => {
+  /** An input is usable if visible itself or wrapped in a visible label (DoL hides radios and styles the label). */
+  const inputUsable = (el) => {
+    if (isElementVisible(el)) return true;
+    const lab = el.closest ? el.closest('label') : null;
+    return !!(lab && isElementVisible(lab));
+  };
+
+  const collectInteractives = (root, collectOpts) => {
+    const cOpts = collectOpts || {};
+    const inputsLimit = Math.max(1, Math.min(cOpts.inputsLimit || 40, 500));
+    const inputsOffset = Math.max(0, cOpts.inputsOffset || 0);
     const scope = root || document;
     // Clear stale refs page-wide.
     for (const el of document.querySelectorAll('[data-twmcp-ref]')) el.removeAttribute('data-twmcp-ref');
@@ -283,15 +293,26 @@
     let cIdx = 0;
     let iIdx = 0;
     let uIdx = 0;
+    let inputsSeen = 0;
 
     const UI_EXCLUDE = '#ui-bar, tw-sidebar, .tw-sidebar, #menu, .menu, #backstage, [data-cb-backstage], footer, header, #spinner, .warnings, [data-cb-restart]';
-    const UI_CONTAINERS = '#ui-dialog, .ui-dialog, #ui-bar, #startCaption, #story-caption, #startBannerModLoaderGui, #ui-overlay';
 
     const dialogEl = () => {
       for (const el of document.querySelectorAll('#ui-dialog, .ui-dialog, dialog')) {
         if (isElementVisible(el)) return el;
       }
       return null;
+    };
+
+    // Count every eligible input; only ref+report the window [inputsOffset, inputsOffset+inputsLimit).
+    const takeInput = (el, extra) => {
+      const pos = inputsSeen++;
+      if (pos < inputsOffset || inputs.length >= inputsLimit) return;
+      const ref = 'i' + (++iIdx);
+      el.setAttribute('data-twmcp-ref', ref);
+      const d = describeInput(el, ref);
+      if (extra) Object.assign(d, extra);
+      inputs.push(d);
     };
 
     // 1. Passage-scoped choices.
@@ -317,11 +338,8 @@
     for (const el of scope.querySelectorAll(inputSel)) {
       if (seen.has(el)) continue;
       seen.add(el);
-      if (inputs.length >= 40) break;
-      if (!isElementVisible(el)) continue;
-      const ref = 'i' + (++iIdx);
-      el.setAttribute('data-twmcp-ref', ref);
-      inputs.push(describeInput(el, ref));
+      if (!inputUsable(el)) continue;
+      takeInput(el);
     }
 
     // 3. Modal dialog buttons and inputs become numbered choices / inputs (the agent must be able to answer dialogs).
@@ -330,7 +348,7 @@
     if (dlg) {
       const dlgText = normalize(dlg.innerText || '').slice(0, 1200);
       const titleEl = dlg.querySelector('.ui-dialog-title, .title, h3');
-      const buttons = [];
+      const dlgButtons = [];
       for (const el of dlg.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"], .link-internal')) {
         if (!isElementVisible(el) || seen.has(el)) continue;
         seen.add(el);
@@ -340,18 +358,19 @@
         if (!d.label) continue;
         d.dialog = true;
         choices.push(d);
-        buttons.push(d);
+        dlgButtons.push(d);
       }
-      for (const el of dlg.querySelectorAll('input:not([type="hidden"]), textarea, select')) {
-        if (!isElementVisible(el) || seen.has(el) || inputs.length >= 40) continue;
+      for (const el of dlg.querySelectorAll('input:not([type="hidden"]):not([type="file"]), textarea, select')) {
+        if (seen.has(el) || !inputUsable(el)) continue;
         seen.add(el);
-        const ref = 'i' + (++iIdx);
-        el.setAttribute('data-twmcp-ref', ref);
-        const d = describeInput(el, ref);
-        d.dialog = true;
-        inputs.push(d);
+        takeInput(el, { dialog: true });
       }
-      dialog = { title: titleEl ? normalize(titleEl.textContent || '').slice(0, 120) : null, text: dlgText, buttons: buttons.length };
+      dialog = {
+        title: titleEl ? normalize(titleEl.textContent || '').slice(0, 120) : null,
+        text: dlgText,
+        buttonCount: dlgButtons.length,
+        buttons: dlgButtons.map((b) => ({ n: choices.indexOf(b) + 1, label: b.label, ref: b.ref }))
+      };
     }
 
     // 4. Ambient UI (sidebar, menu, ModLoader banner) exposed separately, not as passage choices.
@@ -365,7 +384,7 @@
       ui.push({ ref, label, kind: 'ui' });
     }
 
-    return { choices, inputs, ui, dialog };
+    return { choices, inputs, ui, dialog, inputsTotal: inputsSeen, inputsOffset };
   };
 
   // ---------------------------------------------------------------------------
@@ -455,6 +474,55 @@
     return null;
   };
 
+  /** Read selected story variables by dot path (e.g. "haircolour", "V.background", "player.name"). */
+  const getVariables = (opts) => {
+    const o = opts || {};
+    const fmt = detectFormat().name;
+    const S = sugar() || window;
+    let vars = null;
+    if (fmt === 'sugarcube') {
+      if (S.State && S.State.variables) vars = S.State.variables;
+      else if (S.state && S.state.variables) vars = S.state.variables;
+    }
+    if (!vars || typeof vars !== 'object') {
+      return { ok: false, error: 'unsupported', message: 'Story variables are not readable here (SugarCube required).' };
+    }
+    const paths = Array.isArray(o.paths) ? o.paths.map(String).filter(Boolean).slice(0, 50) : [];
+    if (!paths.length) {
+      const keys = Object.keys(vars);
+      const summary = {};
+      for (const k of keys.slice(0, 200)) {
+        try {
+          const v = vars[k];
+          summary[k] =
+            v === null || v === undefined ? (v ?? null)
+              : Array.isArray(v) ? '[' + v.length + ' items]'
+              : typeof v === 'object' ? '{' + Object.keys(v).length + ' keys}'
+              : sanitize(v, 0, new Set());
+        } catch (_) { summary[k] = '[unreadable]'; }
+      }
+      return { ok: true, mode: 'keys', totalKeys: keys.length, keys: keys.slice(0, 200), summary };
+    }
+    const values = {};
+    const missing = [];
+    for (const p of paths) {
+      const clean = String(p)
+        .replace(/^\$/, '')
+        .replace(/^(?:State\.)?[Vv]ariables\./, '')
+        .replace(/^V\./, '');
+      const parts = clean.split('.').filter(Boolean);
+      let cur = vars;
+      let found = parts.length > 0;
+      for (const part of parts) {
+        if (cur && typeof cur === 'object' && Object.prototype.hasOwnProperty.call(cur, part)) cur = cur[part];
+        else { found = false; break; }
+      }
+      if (found) values[p] = sanitize(cur, 0, new Set());
+      else missing.push(p);
+    }
+    return { ok: true, mode: 'paths', values, missing };
+  };
+
   // ---------------------------------------------------------------------------
   // Engine helpers
   // ---------------------------------------------------------------------------
@@ -530,7 +598,7 @@
     const root = getPassageRoot();
     const maxChars = Math.max(200, Math.min(o.maxTextChars || 12000, 200000));
     const text = root ? htmlToMarkdown(root, maxChars) : '';
-    const interactives = collectInteractives(root);
+    const interactives = collectInteractives(root, { inputsOffset: o.inputsOffset, inputsLimit: o.inputsLimit });
     const meta = storyMeta();
 
     let variables = null;
@@ -563,6 +631,8 @@
       text,
       choices: interactives.choices,
       inputs: interactives.inputs,
+      inputsTotal: interactives.inputsTotal,
+      inputsOffset: interactives.inputsOffset,
       ui: interactives.ui,
       dialog: interactives.dialog,
       status,
@@ -618,7 +688,30 @@
   let refSeq = 0;
   const nextRef = (prefix) => prefix + (++refSeq);
 
-  const UI_CANDIDATES = 'button, a, [role="button"], [role="link"], input[type="button"], input[type="submit"], .link-internal, [onclick], [data-twmcp-ref]';
+  // Labels are included on purpose: SugarCube's <<radiobutton>>/<<checkbox>> macros and many
+  // Twine UIs render options as <label> elements with the real input hidden inside.
+  const UI_CANDIDATES = 'button, a, label, [role="button"], [role="link"], [role="radio"], [role="checkbox"], input[type="button"], input[type="submit"], .link-internal, [onclick], [data-twmcp-ref]';
+
+  /** Best-effort click target: the element itself when clickable, else its label / onclick ancestor. */
+  const clickTargetOf = (el) => {
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'label' || tag === 'button' || tag === 'a' || tag === 'input' || tag === 'select' || tag === 'textarea') return el;
+    const oc = el.closest ? el.closest('[onclick]') : null;
+    if (oc) return oc;
+    const lab = el.closest ? el.closest('label') : null;
+    if (lab) return lab;
+    return el;
+  };
+
+  /** Visible label text for a clickable element (inputs resolve through their <label>). */
+  const clickableLabel = (el) => {
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+      const lab = el.labels && el.labels.length ? el.labels[0] : (el.closest ? el.closest('label') : null);
+      return normalize((lab && lab.innerText) || el.getAttribute('aria-label') || el.title || '').slice(0, 200);
+    }
+    return normalize(el.innerText || el.value || el.getAttribute('aria-label') || el.title || '').slice(0, 200);
+  };
 
   /** Resolve a UI element by ref, CSS selector or visible text into a data-twmcp-ref. */
   const resolveUi = (opts) => {
@@ -626,7 +719,7 @@
     if (o.ref) {
       const ref = String(o.ref).replace(/["\\]/g, '');
       const el = document.querySelector('[data-twmcp-ref="' + ref + '"]');
-      return el ? { ok: true, ref } : { ok: false, error: 'stale-ref', message: 'Ref ' + ref + ' no longer exists.' };
+      return el ? { ok: true, ref } : { ok: false, error: 'stale-ref', message: 'Ref ' + ref + ' no longer exists. Call observe() to refresh refs.' };
     }
     if (o.selector) {
       let el = null;
@@ -636,9 +729,13 @@
         return { ok: false, error: 'bad-selector', message: String((e && e.message) || e) };
       }
       if (!el) return { ok: false, error: 'no-match', message: 'No element matches selector "' + o.selector + '".' };
-      const ref = nextRef('x');
-      el.setAttribute('data-twmcp-ref', ref);
-      return { ok: true, ref, label: normalize(el.innerText || el.value || '').slice(0, 80) };
+      const target = clickTargetOf(el);
+      let ref = target.getAttribute('data-twmcp-ref');
+      if (!ref) {
+        ref = nextRef('x');
+        target.setAttribute('data-twmcp-ref', ref);
+      }
+      return { ok: true, ref, label: clickableLabel(target) };
     }
     if (o.text) {
       const needle = normalizeLabelText(o.text);
@@ -646,20 +743,93 @@
       const cands = [];
       for (const el of document.querySelectorAll(UI_CANDIDATES)) {
         if (!isElementVisible(el)) continue;
-        const label = normalize(el.innerText || el.value || el.getAttribute('aria-label') || el.title || '');
+        const label = clickableLabel(el);
         if (!label) continue;
         const hay = normalizeLabelText(label);
         const hit = exact ? hay === needle : hay.includes(needle);
         if (hit) cands.push({ el, label });
       }
-      if (!cands.length) return { ok: false, error: 'no-match', message: 'No visible UI element contains "' + o.text + '".' };
+      if (!cands.length) {
+        return {
+          ok: false,
+          error: 'no-match',
+          message:
+            'No visible UI element matches "' + o.text + '". ' +
+            'Use find_ui(text) to search labels/inputs, or observe() to see numbered choices/inputs.'
+        };
+      }
       cands.sort((a, b) => a.label.length - b.label.length);
       const pick = cands[0];
-      const ref = nextRef('x');
-      pick.el.setAttribute('data-twmcp-ref', ref);
-      return { ok: true, ref, label: pick.label, matches: cands.length, alternatives: cands.slice(1, 6).map((c) => c.label) };
+      const target = clickTargetOf(pick.el);
+      let ref = target.getAttribute('data-twmcp-ref');
+      if (!ref) {
+        ref = nextRef('x');
+        target.setAttribute('data-twmcp-ref', ref);
+      }
+      return {
+        ok: true,
+        ref,
+        label: pick.label,
+        tag: target.tagName.toLowerCase(),
+        matches: cands.length,
+        alternatives: cands.slice(1, 6).map((c) => c.label)
+      };
     }
     return { ok: false, error: 'missing-argument', message: 'Provide ref, selector or text.' };
+  };
+
+  /** Find visible controls (buttons, links, labels, inputs) by text/name; returns refs for click_ui/interact. */
+  const findUi = (opts) => {
+    const o = opts || {};
+    const hasText = o.text != null && String(o.text) !== '';
+    const needle = hasText ? normalizeLabelText(o.text) : '';
+    const exact = !!o.exact;
+    const kindWant = o.kind ? String(o.kind).toLowerCase() : null;
+    const nameWant = o.name ? String(o.name) : null;
+    const limit = Math.max(1, Math.min(o.limit || 20, 100));
+    const selector =
+      'button, a, label, [role="button"], [role="link"], [role="radio"], [role="checkbox"], ' +
+      'input:not([type="hidden"]):not([type="file"]), textarea, select, .link-internal, [onclick]';
+    const matches = [];
+    let total = 0;
+    for (const el of document.querySelectorAll(selector)) {
+      if (!isElementVisible(el) && !inputUsable(el)) continue;
+      const tag = el.tagName.toLowerCase();
+      const type = (el.getAttribute('type') || '').toLowerCase();
+      const kind =
+        tag === 'input' ? 'input:' + (type || 'text')
+          : tag === 'select' ? 'select'
+          : tag === 'textarea' ? 'textarea'
+          : tag === 'label' ? 'label'
+          : tag === 'a' || el.classList.contains('link-internal') ? 'link'
+          : 'button';
+      if (kindWant && !(kind.startsWith(kindWant) || kind.includes(':' + kindWant))) continue;
+      if (nameWant && el.getAttribute('name') !== nameWant) continue;
+      const label = clickableLabel(el);
+      if (hasText) {
+        if (!label) continue;
+        const hay = normalizeLabelText(label);
+        const hit = exact ? hay === needle : hay.includes(needle);
+        if (!hit) continue;
+      } else if (!label && !nameWant) continue;
+      total++;
+      if (matches.length >= limit) continue;
+      const target = clickTargetOf(el);
+      let ref = target.getAttribute('data-twmcp-ref');
+      if (!ref) {
+        ref = nextRef('x');
+        target.setAttribute('data-twmcp-ref', ref);
+      }
+      const m = { ref, kind, label, tag };
+      const name = el.getAttribute('name');
+      if (name) m.name = name;
+      if (type === 'radio' || type === 'checkbox') m.checked = !!el.checked;
+      if (el.disabled) m.disabled = true;
+      if (tag === 'select' && el.options && el.selectedIndex >= 0) m.value = String(el.options[el.selectedIndex].textContent || '').slice(0, 60);
+      else if ((type === 'text' || type === 'search' || type === 'number' || tag === 'textarea') && typeof el.value === 'string' && el.value) m.value = el.value.slice(0, 80);
+      matches.push(m);
+    }
+    return { ok: true, matches, total, truncated: total > matches.length };
   };
 
   /** Inspect any DOM subtree (dialogs, mod GUIs, backstage panels): text + ref'd buttons/inputs.
@@ -965,6 +1135,7 @@
     waitStable,
     clickRef,
     resolveUi,
+    findUi,
     inspectUi,
     fillRef,
     pressKey,
@@ -975,6 +1146,7 @@
     restore,
     seed,
     meta: storyMeta,
+    getVariables,
     detectFormat
   };
 })();

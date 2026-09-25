@@ -67,6 +67,34 @@ try {
   const journal = textOf(await client.callTool({ name: 'get_journal', arguments: { game_id: gameId } }));
   check('journal records play', /Journal: \d+ action/.test(journal) && /▷继续/.test(journal), journal.split('\n')[0] ?? '');
 
+  const findUi = textOf(await client.callTool({ name: 'find_ui', arguments: { game_id: gameId, text: '继续' } }));
+  check('find_ui finds labelled controls', /Found [1-9]/.test(findUi), findUi.split('\n')[0] ?? '');
+
+  const vars = textOf(await client.callTool({ name: 'get_variables', arguments: { game_id: gameId } }));
+  let varsOk = false;
+  try {
+    varsOk = !!(JSON.parse(vars) as { ok?: boolean }).ok;
+  } catch {
+    varsOk = false;
+  }
+  check('get_variables returns JSON', varsOk, vars.slice(0, 120));
+
+  const obsJson = textOf(await client.callTool({ name: 'observe', arguments: { game_id: gameId, format: 'json', since_last: false } }));
+  let jsonPassage: string | null = null;
+  try {
+    jsonPassage = (JSON.parse(obsJson) as { passage?: string }).passage ?? null;
+  } catch {
+    jsonPassage = null;
+  }
+  check('observe format:json parses', !!jsonPassage, obsJson.slice(0, 120));
+
+  const badChoice = textOf(await client.callTool({ name: 'choose', arguments: { game_id: gameId, choice: 'no-such-choice-xyz' } }));
+  check(
+    'errors are concise and list choices',
+    /Available choices:/.test(badChoice) && badChoice.length < 900,
+    `${badChoice.length} chars`
+  );
+
   const list = textOf(await client.callTool({ name: 'list_games', arguments: {} }));
   check('list_games works', list.includes(gameId!), list.split('\n')[0] ?? '');
 

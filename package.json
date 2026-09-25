@@ -11,6 +11,7 @@
     "build": "tsc -p tsconfig.json && mkdir -p dist/bridge && cp src/bridge/bridge.js dist/bridge/bridge.js",
     "dev": "tsx src/index.ts",
     "spike": "tsx scripts/spike.ts",
+    "clarity": "tsx scripts/clarity-check.ts",
     "formats": "tsx scripts/formats.ts",
     "fixtures": "bash test/fixtures/build.sh",
     "smoke": "tsx scripts/mcp-smoke.ts"

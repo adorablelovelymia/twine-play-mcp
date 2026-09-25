@@ -38,6 +38,12 @@ export function renderObservation(obs: Observation, opts: RenderOptions = {}): s
     lines.push('');
     lines.push(`Dialog${obs.dialog.title ? ` — ${oneLine(obs.dialog.title)}` : ''}:`);
     if (obs.dialog.text) lines.push(obs.dialog.text.slice(0, 800));
+    if (obs.dialog.buttons?.length) {
+      lines.push(
+        'Dialog buttons (use choose): ' +
+          obs.dialog.buttons.map((b) => `${b.n}) ${oneLine(b.label)}`).join('  ')
+      );
+    }
   }
 
   lines.push('');
@@ -64,7 +70,15 @@ export function renderObservation(obs: Observation, opts: RenderOptions = {}): s
 
   if (obs.inputs.length) {
     lines.push('');
-    lines.push(`Inputs (${obs.inputs.length}):`);
+    const total = obs.inputsTotal ?? obs.inputs.length;
+    const offset = obs.inputsOffset ?? 0;
+    const last = offset + obs.inputs.length;
+    let head = `Inputs (${obs.inputs.length})`;
+    if (total > obs.inputs.length) {
+      head = last > 0 ? `Inputs (${offset + 1}-${last} of ${total})` : `Inputs (none in this window of ${total})`;
+      if (total > last) head += ` — pass inputs_offset=${last} for the rest`;
+    }
+    lines.push(head + (obs.inputs.length ? ':' : ''));
     for (const inp of obs.inputs) {
       const bits = [`${inp.ref} ${inp.kind}`];
       if (inp.label) bits.push(`"${inp.label.slice(0, 50)}"`);
@@ -73,6 +87,7 @@ export function renderObservation(obs: Observation, opts: RenderOptions = {}): s
       if (inp.checked !== undefined) bits.push(inp.checked ? '[checked]' : '[unchecked]');
       if (inp.placeholder) bits.push(`placeholder="${inp.placeholder.slice(0, 60)}"`);
       if (inp.options?.length) bits.push(`options=[${inp.options.map((o) => o.label).join(' | ').slice(0, 200)}]`);
+      if (inp.dialog) bits.push('[dialog]');
       lines.push('  ' + bits.join(' '));
     }
   }

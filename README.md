@@ -89,13 +89,15 @@ Environment variables:
 | Tool | What it does |
 | --- | --- |
 | `open_game` | Open a local HTML file/folder or URL; optional PRNG seed; returns first observation |
-| `observe` | Passage text, numbered choices, inputs, status bar, variables (`since_last` saves tokens) |
-| `choose` | Click by 1-based number or label; `expected` guard; external links blocked by default |
+| `observe` | Passage text, numbered choices, inputs (paginated windows of 40 with `inputs_offset`), dialog, status bar; `since_last` saves tokens; `format:"json"` for structured output |
+| `choose` | Click by 1-based number or label; works for passage choices *and* dialog buttons; `expected` guard; external links blocked by default |
 | `wait` | Wait for ms / for text / for the DOM to settle |
 | `interact` | Fill inputs/selects/checkboxes by ref, or press a key |
-| `click_ui` | Click dialogs, sidebar and menus (by ref / CSS selector / visible text), including inside iframes |
+| `find_ui` | Find buttons/links/**labels**/inputs by visible text or input name; returns refs for `click_ui`/`interact`. The fastest way to reach radio/checkbox options (SugarCube macro labels) |
+| `click_ui` | Click dialogs, sidebar and menus (by ref / CSS selector / visible text), including `<label>`-based controls and iframes |
 | `upload_file` | Upload a local file into an `<input type=file>` (mod .zip, .save import) via trigger button or direct input, frame-aware |
 | `inspect_ui` | Inspect or discover UI panels outside the passage (mod GUIs, backstage); lists buttons/inputs and file inputs |
+| `get_variables` | Read story variables by dot path (`V.hairlength`), or a shallow top-level key summary; avoids dumping the whole variable state |
 | `back` | Undo one passage (SugarCube `Engine.backward`) |
 | `restart` | Restart from the beginning, optionally reseeding the PRNG |
 | `save_state` / `load_state` | Named in-session snapshots for branch exploration |
@@ -103,6 +105,23 @@ Environment variables:
 | `get_console_errors` | JS exceptions, console errors and HTTP failures captured from the page |
 | `get_journal` | Action history: passages visited, choices taken, coverage counts |
 | `list_games` / `close_game` | Session management |
+
+### Agent ergonomics
+
+- **Output**: every play tool returns a formatted text observation (a string). Pass `format:"json"`
+  to receive a JSON string instead (`JSON.parse` it) with `passage`, `text`, `choices[{n,label,target}]`,
+  `inputs[{ref,kind,label,checked}]`, `inputsTotal`, `dialog`, `status`.
+- **Inputs are paginated, not truncated**: a header like `Inputs (41-80 of 140)` plus
+  `inputs_offset=80` means everything is reachable — no silent hard cap.
+- **Label matching**: `click_ui(text)` and `find_ui(text)` understand SugarCube `<<radiobutton>>` /
+  `<<checkbox>>` labels, so options like "Jet black" or combat moves like "Punch" are clickable by text.
+- **Errors are compact**: failures return `ERROR: code — message`, a `Hint`, the current passage and the
+  available choices — never a full observation dump.
+- **Variables**: observations do not embed variable blobs by default; use `get_variables` for the keys
+  you care about. `include_variables:true` is still available when you want the (truncated) dump.
+- **Dialogs**: dialog buttons appear as numbered choices tagged `[dialog]`, and a `Dialog buttons:` line
+  lists them; checkbox labels are shown on the input line.
+
 
 ## Format support
 
@@ -168,6 +187,7 @@ Real games are not just passages and links. The MCP handles the awkward parts:
 npm run spike      # 17 checks against a real SugarCube 2.37 game (play, back, snapshot, screenshot)
 npm run formats    # 4 compiled fixtures: SugarCube 2.30, Harlowe 3.1, Snowman 2.0, Chapbook 1.0
 npm run smoke      # spawns the built MCP server and drives the tools over stdio
+npm run clarity    # agent-ergonomics regression on DoL character creation (pagination, labels, variables)
 npm run fixtures   # rebuild test/fixtures/compiled/*.html with Tweego (see test/fixtures/build.sh)
 npx tsx scripts/dol-mcp-test.ts   # Degrees of Lewdity: gate, mod import, save import, play
 ```
@@ -183,6 +203,9 @@ adding a new adapter.
 - [x] M2: play journal (`get_journal`) for run summaries, resuming and QA coverage
 - [x] M3: dialogs/iframe-aware UI control (`click_ui`, `inspect_ui`, `upload_file`) — verified on
       Degrees of Lewdity (mod import + save import + play)
+- [x] M4: agent ergonomics — input pagination + totals, `find_ui` label search, `get_variables`,
+      `format:"json"`, compact errors (driven by a naive-agent playtest that stalled on DoL
+      character creation)
 - [ ] M3: `click_at` for canvas games, spoiler-gated story-map analysis, npm packaging
 
 ## Safety notes

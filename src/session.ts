@@ -37,7 +37,8 @@ export interface UiButton {
 export interface DialogInfo {
   title: string | null;
   text: string;
-  buttons: number;
+  buttonCount: number;
+  buttons: Array<{ n: number; label: string; ref: string }>;
 }
 
 export interface Observation {
@@ -51,6 +52,8 @@ export interface Observation {
   text: string;
   choices: ChoiceInfo[];
   inputs: InputInfo[];
+  inputsTotal?: number;
+  inputsOffset?: number;
   ui: UiButton[];
   dialog: DialogInfo | null;
   status: string | null;
@@ -305,12 +308,20 @@ export class SessionManager {
 
   async observe(
     session: GameSession,
-    opts: { includeVariables?: boolean; includeStatus?: boolean; maxTextChars?: number } = {}
+    opts: {
+      includeVariables?: boolean;
+      includeStatus?: boolean;
+      maxTextChars?: number;
+      inputsOffset?: number;
+      inputsLimit?: number;
+    } = {}
   ): Promise<Observation> {
     const obs = await this.bridge<Observation & BridgeResult>(session, 'observe', {
       includeVariables: opts.includeVariables ?? true,
       includeStatus: opts.includeStatus ?? true,
-      maxTextChars: opts.maxTextChars ?? 12000
+      maxTextChars: opts.maxTextChars ?? 12000,
+      inputsOffset: opts.inputsOffset ?? 0,
+      inputsLimit: opts.inputsLimit ?? 40
     });
     session.lastObservation = obs;
     return obs;
@@ -639,6 +650,39 @@ export class SessionManager {
       }
     }
     return { ok: false, error: 'no-file-input', message: lastErr || `No file input matched ${selector}` };
+  }
+
+  /** Find visible controls (buttons, links, labels, inputs) by text/name; refs work with click_ui/interact. */
+  async findUi(
+    session: GameSession,
+    opts: { text?: string; exact?: boolean; kind?: string; name?: string; limit?: number }
+  ): Promise<{
+    ok: boolean;
+    error?: string;
+    message?: string;
+    matches?: Array<{ ref: string; kind: string; label: string; tag: string; name?: string; checked?: boolean; disabled?: boolean; value?: string }>;
+    total?: number;
+    truncated?: boolean;
+  }> {
+    return this.bridge(session, 'findUi', opts);
+  }
+
+  /** Read selected story variables by dot path (e.g. ["haircolour", "V.background"]). No paths = top-level key summary. */
+  async getVariables(
+    session: GameSession,
+    paths?: string[]
+  ): Promise<{
+    ok: boolean;
+    error?: string;
+    message?: string;
+    mode?: string;
+    values?: Record<string, unknown>;
+    missing?: string[];
+    keys?: string[];
+    summary?: Record<string, unknown>;
+    totalKeys?: number;
+  }> {
+    return this.bridge(session, 'getVariables', { paths: paths ?? [] });
   }
 
   /** Inspect an arbitrary UI subtree (mod GUI, backstage panel) or discover overlay panels. */
