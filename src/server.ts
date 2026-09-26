@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { SessionManager, type ChoiceInfo, type DialogInfo, type GameSession, type Observation } from './session.js';
 import { renderConsole, renderObservation, renderOpen } from './render.js';
-import { forgetLiveView, liveViewUrl, openInBrowser } from './live-view.js';
+import { claimAutoOpen, forgetLiveView, liveViewUrl, openInBrowser } from './live-view.js';
 
 type TextResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 
@@ -106,7 +106,18 @@ function observationText(session: GameSession, obs: Observation, sinceLast: bool
 }
 
 export function buildServer(manager: SessionManager): McpServer {
-  const server = new McpServer({ name: 'twine-play-mcp', version: '0.1.0' });
+  const server = new McpServer(
+    { name: 'twine-play-mcp', version: '0.1.0' },
+    {
+      instructions:
+        'DISPLAY POLICY — how to let the user watch a game (follow this to avoid stacking windows on their screen):\n' +
+        '• Show at most ONE view per game. Pick exactly one method; never combine them.\n' +
+        '• Default: call live_view(game_id) and give the user the returned URL; pass open:true only if they asked you to open it for them. Auto-open happens at most once per game.\n' +
+        '• Only if the user explicitly asks for a real browser window: open_game with headless:false. Do not also open a live view for the same game.\n' +
+        '• screenshot is a one-shot visual check, never a stream — do not loop it to "show" the user the game.\n' +
+        '• If a view is already open, reuse it (live_view returns the same URL without launching anything new).'
+    }
+  );
 
   server.registerTool(
     'open_game',
@@ -120,7 +131,12 @@ export function buildServer(manager: SessionManager): McpServer {
         'Inputs are listed in windows of 40 (see inputs_offset/inputs_limit on observe) and find_ui(text) locates any control by label.',
       inputSchema: {
         source: z.string().describe('Path to an .html file or folder, or an http(s) URL.'),
-        headless: z.boolean().optional().describe('Run browser headless (default true). Set false to watch the game.'),
+        headless: z
+          .boolean()
+          .optional()
+          .describe(
+            'Run browser headless (default true). Set false ONLY when the user explicitly asks to watch a real browser window — and then do not also open a live_view for the same game.'
+          ),
         seed: z.string().optional().describe('Seed SugarCube PRNG (State.prng) for reproducible runs; game must use SugarCube randomness to be deterministic.'),
         include_variables: z.boolean().optional().describe('Embed the (truncated) story variables in the observation (default false; prefer get_variables for specific keys).'),
         format: formatParam,
@@ -691,7 +707,9 @@ export function buildServer(manager: SessionManager): McpServer {
     'screenshot',
     {
       title: 'Screenshot the game',
-      description: 'Take a PNG screenshot of the game viewport. Useful for canvas/image-driven games and visual QA. Pass path to save it to a file (returns the path instead of the image).',
+      description:
+        'Take a PNG screenshot of the game viewport. Useful for canvas/image-driven games and visual QA. Pass path to save it to a file (returns the path instead of the image). ' +
+        'One-shot: this is not a live view — to let the user watch the game, call live_view once instead of taking screenshots repeatedly.',
       inputSchema: {
         game_id: gameId,
         path: z.string().optional().describe('Optional output file path; when set, the PNG is written there and only the path is returned.')
@@ -788,26 +806,41 @@ export function buildServer(manager: SessionManager): McpServer {
         'Give the user eyes on the actual page the agent is controlling: starts a tiny local web server (once per MCP process) that streams ' +
         'JPEG screenshots of the real Playwright tab (~1/s) together with passage, step, engine state, recent actions and the passage text. ' +
         'Returns a URL like http://127.0.0.1:4571/v/game_abc — open it in any browser (works with headless games too). ' +
-        'Frames are captured only while someone is watching. Set open:true to also launch the URL in the default browser.',
+        'Frames are captured only while someone is watching. Set open:true to also launch the URL in the default browser. ' +
+        'DISPLAY POLICY: this is the default — and usually the only — way to show a game. One view per game: do not also switch to a headed window ' +
+        'or loop screenshot; repeated calls return the same URL and never launch a second browser tab.',
       inputSchema: {
         game_id: gameId,
-        open: z.boolean().optional().describe('Also open the URL in the default browser on this machine (default false).')
+        open: z
+          .boolean()
+          .optional()
+          .describe('Also open the URL in the default browser on this machine (default false). Only pass true when the user wants you to open it — at most once per game.')
       }
     },
     async ({ game_id, open }) => {
       try {
         const session = manager.get(game_id);
         const url = await liveViewUrl(manager, session);
-        const opened = open ? openInBrowser(url) : false;
+        const headed = manager.browserIsHeaded;
+        let openNote = '';
+        if (open) {
+          if (headed) {
+            openNote =
+              'Auto-open skipped: this game already runs in a visible (headed) browser window, so the user can already see the real page — do not add a second view. ';
+          } else if (claimAutoOpen(session.id)) {
+            openNote = openInBrowser(url)
+              ? 'Opened in the default browser. '
+              : 'Could not launch a browser (no xdg-open/open?) — open the URL manually. ';
+          } else {
+            openNote = 'A browser was already opened for this game earlier — reuse that tab; the URL is unchanged. ';
+          }
+        }
         return text(
-          `Live view for ${session.id}: ${url}\n` +
-            (open
-              ? opened
-                ? 'Opened in the default browser. '
-                : 'Could not launch a browser (no xdg-open/open?) — open the URL manually. '
-              : '') +
+          (headed ? 'NOTE: headed (visible) browser window in use — one view is enough; do not open another.\n' : '') +
+            `Live view for ${session.id}: ${url}\n` +
+            openNote +
             `Refreshes ~1/s and shows passage/step/journal. Attaches to the running tab; nothing needs restarting. ` +
-            `Stop by closing the game; the server itself shuts down with the MCP.`
+            `Display policy: one view per game — reuse an open view instead of stacking another.`
         );
       } catch (err) {
         return errorText('live-view-failed', String((err as Error)?.message ?? err));

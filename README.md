@@ -123,6 +123,20 @@ game with `headless: false` (`open_game`).
 Handy combo: if your client can show a web page in a side pane (e.g. OpenCode's Review pane /
 `browser.tabs.open`), point it at the live-view URL and you can follow along while the agent plays.
 
+**Pick one view (agents).** To keep the user's screen clean, show a running game through exactly one
+channel — never stack them:
+
+1. **Default:** `live_view` — hand the URL to the user, or pass `open: true` once to launch it for
+   them. Repeated calls reuse the same view and never open another tab.
+2. **Only on explicit request:** `open_game(headless: false)` when the user asks for a real browser
+   window. Don't add a live view on top; a headed window is already visible.
+3. `screenshot` is a one-shot visual check, **not** a stream — don't loop it to "show" the game.
+
+If a view (live view tab or headed window) is already open, reuse it instead of starting a second
+one. The MCP server ships this same policy in its `instructions` field, so MCP clients can pass it
+to the model automatically; the tool descriptions repeat it where it matters (`live_view`,
+`open_game.headless`, `screenshot`).
+
 ### Agent ergonomics
 
 - **Output**: every play tool returns a formatted text observation (a string). Pass `format:"json"`
@@ -248,4 +262,6 @@ adding a new adapter.
 支持 SugarCube 原生 API，其余格式走通用 DOM 兜底。
 只看不猜：`live_view` 给你一个本地网址，用任意浏览器就能实时看到 AI 正在操作的真实页面；
 也可以 `open_game(headless: false)` 直接弹出浏览器窗口。
+显示方式只选一种：默认 `live_view`（需要时让它帮你打开一次），用户明说要真实窗口才用有头模式，
+别同时叠加窗口/标签页/反复截图刷屏——MCP 的 `instructions` 与工具说明里都写了这条规则。
 配置方式见上方 OpenCode / Claude Desktop 片段。

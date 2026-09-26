@@ -177,6 +177,11 @@ export class SessionManager {
     this.chromePath = chromePath ?? process.env.TWMCP_CHROME_PATH;
   }
 
+  /** True when the shared browser is currently running with a visible window (open_game headless:false). */
+  get browserIsHeaded(): boolean {
+    return !!this.browser && this.browserHeadless === false;
+  }
+
   private async launchBrowser(headless: boolean): Promise<Browser> {
     const attempts: Array<Record<string, unknown>> = [];
     if (this.chromePath) attempts.push({ executablePath: this.chromePath, headless });

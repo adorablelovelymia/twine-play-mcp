@@ -288,6 +288,19 @@ export function forgetLiveView(id: string): void {
   capturing.delete(id);
 }
 
+/** Sessions for which a browser tab was already auto-opened. */
+const autoOpened = new Set<string>();
+
+/**
+ * Guard so a careless agent cannot spawn a new browser tab on every live_view call:
+ * returns true only the first time it is asked for a given session.
+ */
+export function claimAutoOpen(id: string): boolean {
+  if (autoOpened.has(id)) return false;
+  autoOpened.add(id);
+  return true;
+}
+
 /** Open a URL in the user's default browser (best effort; returns false when unavailable). */
 export function openInBrowser(url: string): boolean {
   try {

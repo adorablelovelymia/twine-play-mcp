@@ -8,7 +8,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import fs from 'node:fs';
 
-const GAME = process.env.TWMCP_GAME ?? '/home/qiyue/Projects/ts_ero_trap_dungeon-1.0.6/build/TS-Ero-Trap-Dungeon.html';
+// Folder input: the tool picks index.html (works for both the "build/…" and the flat release layout).
+const GAME = process.env.TWMCP_GAME ?? '/home/qiyue/Projects/ts_ero_trap_dungeon-1.0.6';
 const HERE = new URL('..', import.meta.url).pathname;
 
 const client = new Client({ name: 'twine-play-smoke', version: '0.1.0' });
@@ -66,9 +67,9 @@ try {
   check('console clean', /No console errors/.test(errs), errs.slice(0, 120));
 
   const journal = textOf(await client.callTool({ name: 'get_journal', arguments: { game_id: gameId } }));
-  check('journal records play', /Journal: \d+ action/.test(journal) && /▷继续/.test(journal), journal.split('\n')[0] ?? '');
+  check('journal records play', /Journal: \d+ action/.test(journal) && /▷/.test(journal), journal.split('\n')[0] ?? '');
 
-  const findUi = textOf(await client.callTool({ name: 'find_ui', arguments: { game_id: gameId, text: '继续' } }));
+  const findUi = textOf(await client.callTool({ name: 'find_ui', arguments: { game_id: gameId, text: 'Continue' } }));
   check('find_ui finds labelled controls', /Found [1-9]/.test(findUi), findUi.split('\n')[0] ?? '');
 
   const vars = textOf(await client.callTool({ name: 'get_variables', arguments: { game_id: gameId } }));
@@ -105,7 +106,7 @@ try {
     : '';
   check(
     'click_ui(ref) opens the sidebar dialog',
-    /Dialog buttons/.test(opened) && /Save Slot 1/.test(opened),
+    /Dialog buttons/.test(opened) && /Save to Disk/.test(opened),
     opened.split('\n').find((l) => l.startsWith('Dialog buttons'))?.slice(0, 120) ?? '(no dialog)'
   );
 
@@ -113,7 +114,7 @@ try {
   // then copy the captured file by name — no manual temp-folder handling.
   const dlPath = '/tmp/opencode/twmcp-smoke-save.save';
   const dl = textOf(
-    await client.callTool({ name: 'download_file', arguments: { game_id: gameId, trigger_text: 'Save', path: dlPath } })
+    await client.callTool({ name: 'download_file', arguments: { game_id: gameId, trigger_text: 'Save to Disk', path: dlPath } })
   );
   let dlBytes = 0;
   try {
