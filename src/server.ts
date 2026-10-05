@@ -1,10 +1,27 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { SessionManager, type ChoiceInfo, type DialogInfo, type GameSession, type Observation } from './session.js';
 import { renderConsole, renderObservation, renderOpen } from './render.js';
 import { claimAutoOpen, forgetLiveView, liveViewUrl, openInBrowser } from './live-view.js';
 
 type TextResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
+
+/**
+ * Version reported to MCP clients, read from package.json so it can never drift from the
+ * published version. Works from both dist/server.js and src/server.ts (tsx): the package
+ * root is one level above either directory.
+ */
+const VERSION: string = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version?: string;
+    };
+    return pkg.version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
 
 const text = (body: string, isError = false): TextResult => ({
   content: [{ type: 'text', text: body }],
@@ -107,7 +124,7 @@ function observationText(session: GameSession, obs: Observation, sinceLast: bool
 
 export function buildServer(manager: SessionManager): McpServer {
   const server = new McpServer(
-    { name: 'twine-play-mcp', version: '0.1.0' },
+    { name: 'twine-play-mcp', version: VERSION },
     {
       instructions:
         'DISPLAY POLICY — how to let the user watch a game (follow this to avoid stacking windows on their screen):\n' +
