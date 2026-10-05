@@ -1,6 +1,6 @@
 {
   "name": "twine-play-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server that lets AI agents play, test and QA Twine / interactive-fiction HTML games.",
   "type": "module",
   "license": "MIT",
