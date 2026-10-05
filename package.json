@@ -3,12 +3,40 @@
   "version": "0.1.0",
   "description": "MCP server that lets AI agents play, test and QA Twine / interactive-fiction HTML games.",
   "type": "module",
-  "private": true,
+  "license": "MIT",
+  "author": "adorablelovelymia <selinawell116@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adorablelovelymia/twine-play-mcp.git"
+  },
+  "homepage": "https://github.com/adorablelovelymia/twine-play-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/adorablelovelymia/twine-play-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "twine",
+    "interactive-fiction",
+    "sugarcube",
+    "harlowe",
+    "chapbook",
+    "snowman",
+    "playwright",
+    "game-testing",
+    "qa",
+    "ai-agent"
+  ],
   "bin": {
     "twine-play-mcp": "dist/index.js"
   },
+  "files": [
+    "dist",
+    "src"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json && mkdir -p dist/bridge && cp src/bridge/bridge.js dist/bridge/bridge.js",
+    "prepublishOnly": "npm run build",
     "dev": "tsx src/index.ts",
     "spike": "tsx scripts/spike.ts",
     "clarity": "tsx scripts/clarity-check.ts",
