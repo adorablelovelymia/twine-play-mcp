@@ -103,6 +103,8 @@ export interface DownloadRecord {
   localPath: string | null;
   saved: string | null;
   promise: Promise<void> | null;
+  /** Why persisting this download failed, if it did — surfaced instead of a generic error. */
+  error: string | null;
 }
 
 export interface GameSession {
@@ -691,7 +693,14 @@ export class SessionManager {
   private attachDownloads(session: GameSession): void {
     session.page.on('download', (download) => {
       const rec = this.trackDownload(session, download);
-      if (!rec.promise) rec.promise = this.persistDownload(rec).catch(() => undefined);
+      if (!rec.promise) rec.promise = this.beginPersist(rec);
+    });
+  }
+
+  /** Kick off persistence, recording the reason on failure instead of swallowing it. */
+  private beginPersist(rec: DownloadRecord): Promise<void> {
+    return this.persistDownload(rec).catch((err: unknown) => {
+      rec.error = String((err as Error)?.message ?? err);
     });
   }
 
@@ -704,7 +713,8 @@ export class SessionManager {
       at: Date.now(),
       localPath: null,
       saved: null,
-      promise: null
+      promise: null,
+      error: null
     };
     session.downloads.push(rec);
     if (session.downloads.length > 50) session.downloads.shift();
@@ -804,11 +814,17 @@ export class SessionManager {
       }
       let rec = session.downloads.find((r) => r.download === dl);
       if (!rec) rec = this.trackDownload(session, dl);
-      if (!rec.promise) rec.promise = this.persistDownload(rec).catch(() => undefined);
+      if (!rec.promise) rec.promise = this.beginPersist(rec);
       await rec.promise;
       sourcePath = rec.localPath;
       if (!sourcePath || !fs.existsSync(sourcePath)) {
-        return { ok: false, error: 'download-incomplete', message: `Download "${rec.suggested}" could not be stored in the download folder.` };
+        return {
+          ok: false,
+          error: 'download-incomplete',
+          message:
+            `Download "${rec.suggested}" could not be stored in the download folder` +
+            (rec.error ? `: ${rec.error}` : '.')
+        };
       }
       filename = rec.suggested || path.basename(sourcePath);
     } else if (opts.name || opts.index != null) {

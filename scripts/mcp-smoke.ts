@@ -17,7 +17,11 @@ const transport = new StdioClientTransport({
   command: process.execPath,
   args: [HERE + 'dist/index.js'],
   cwd: HERE,
-  stderr: 'inherit'
+  stderr: 'inherit',
+  // Pass the environment through so TWMCP_* overrides reach the server. The SDK otherwise
+  // sends a minimal default env, which silently drops e.g. TWMCP_DOWNLOAD_DIR — the one knob
+  // you need when the default download folder is not writable (containers, sandboxes, CI).
+  env: process.env as Record<string, string>
 });
 
 const textOf = (res: unknown): string => {
