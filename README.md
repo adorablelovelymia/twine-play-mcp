@@ -1,5 +1,7 @@
 # twine-play-mcp
 
+**English** · [简体中文](README.zh-CN.md)
+
 An MCP server that lets AI agents **play, test and QA Twine / interactive-fiction HTML games**.
 
 The agent reads the current passage, sees numbered choices, clicks them, watches story
@@ -31,9 +33,26 @@ and have no notion of "story state". This server adds a semantic layer:
 - Google Chrome installed (uses `channel: 'chrome'`; no 200 MB browser download)
 - Linux/macOS/Windows
 
-## Quick start
+## Install
 
 ```bash
+npm install -g twine-play-mcp   # or: npx twine-play-mcp
+```
+
+No build step, no browser download — the package ships the compiled server and the page
+bridge, and drives the Chrome you already have.
+
+Then point it at any published Twine HTML file (or a folder containing the game + assets):
+
+```bash
+twine-play-mcp         # MCP server on stdio
+```
+
+### From source (for development)
+
+```bash
+git clone https://github.com/adorablelovelymia/twine-play-mcp.git
+cd twine-play-mcp
 npm install
 npm run build          # compiles to dist/ and copies the page bridge
 
@@ -42,13 +61,10 @@ npm run spike          # 17 end-to-end checks against a real SugarCube game
 npm run smoke          # spawns the MCP server over stdio and drives it with the MCP SDK
 ```
 
-Point it at any published Twine HTML file (or a folder containing the game + assets):
-
-```bash
-node dist/index.js     # MCP server on stdio
-```
-
 ## Client configuration
+
+The snippets below use `npx`, so no global install is required. If you installed globally,
+replace `"npx"` + `"twine-play-mcp"` with `"twine-play-mcp"` on its own.
 
 ### OpenCode (`~/.config/opencode/opencode.json`)
 
@@ -58,7 +74,7 @@ node dist/index.js     # MCP server on stdio
   "mcp": {
     "twine-play": {
       "type": "local",
-      "command": ["node", "/absolute/path/to/twine-play-mcp/dist/index.js"],
+      "command": ["npx", "-y", "twine-play-mcp"],
       "enabled": true
     }
   }
@@ -71,8 +87,8 @@ node dist/index.js     # MCP server on stdio
 {
   "mcpServers": {
     "twine-play": {
-      "command": "node",
-      "args": ["/absolute/path/to/twine-play-mcp/dist/index.js"]
+      "command": "npx",
+      "args": ["-y", "twine-play-mcp"]
     }
   }
 }
@@ -245,7 +261,8 @@ adding a new adapter.
       for a persistent browser download folder (no temp-folder copying)
 - [x] M5: live view — watch the real page in any browser (~1 fps frames + passage/step/journal);
       headed mode via `open_game(headless: false)`
-- [ ] M3: `click_at` for canvas games, spoiler-gated story-map analysis, npm packaging
+- [x] M5: npm packaging — published as [`twine-play-mcp`](https://www.npmjs.com/package/twine-play-mcp)
+- [ ] M3: `click_at` for canvas games, spoiler-gated story-map analysis
 
 ## Safety notes
 
@@ -254,14 +271,14 @@ adding a new adapter.
 - Analytics/tracker hosts are blocked by default (`block_trackers: false` to disable).
 - External links are blocked unless `allow_external: true` is passed.
 
-## 中文速览
+## 中文文档
 
-这是一个让 AI agent 游玩 / 测试 Twine 文字游戏的 MCP 服务：无头 Chrome + 页面桥，
-提供观察、选项点击、变量读取、存档回溯、截图、控制台 QA 等 22 个工具。
-本地游戏会通过内置静态服务器以 `http://127.0.0.1` 打开（保证存档可用），
-支持 SugarCube 原生 API，其余格式走通用 DOM 兜底。
-只看不猜：`live_view` 给你一个本地网址，用任意浏览器就能实时看到 AI 正在操作的真实页面；
-也可以 `open_game(headless: false)` 直接弹出浏览器窗口。
-显示方式只选一种：默认 `live_view`（需要时让它帮你打开一次），用户明说要真实窗口才用有头模式，
-别同时叠加窗口/标签页/反复截图刷屏——MCP 的 `instructions` 与工具说明里都写了这条规则。
-配置方式见上方 OpenCode / Claude Desktop 片段。
+完整中文版见 **[README.zh-CN.md](README.zh-CN.md)**（工具一览、客户端配置、格式支持、实时视图策略等均已翻译）。
+
+一句话：这是一个让 AI agent 游玩 / 测试 Twine 文字游戏的 MCP 服务——无头 Chrome + 页面桥，
+22 个工具，本地游戏经内置静态服务器以 `http://127.0.0.1` 打开（保证存档可用），
+`live_view` 让你用任意浏览器实时看到 AI 正在操作的真实页面。
+
+```bash
+npm install -g twine-play-mcp   # 或 npx twine-play-mcp
+```
