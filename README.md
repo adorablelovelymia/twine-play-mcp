@@ -1,6 +1,6 @@
 # twine-play-mcp
 
-**English** · [简体中文](README.zh-CN.md)
+**English** · [简体中文](README-zh.md)
 
 An MCP server that lets AI agents **play, test and QA Twine / interactive-fiction HTML games**.
 
@@ -273,7 +273,7 @@ adding a new adapter.
 
 ## 中文文档
 
-完整中文版见 **[README.zh-CN.md](README.zh-CN.md)**（工具一览、客户端配置、格式支持、实时视图策略等均已翻译）。
+完整中文版见 **[README-zh.md](README-zh.md)**（工具一览、客户端配置、格式支持、实时视图策略等均已翻译）。
 
 一句话：这是一个让 AI agent 游玩 / 测试 Twine 文字游戏的 MCP 服务——无头 Chrome + 页面桥，
 22 个工具，本地游戏经内置静态服务器以 `http://127.0.0.1` 打开（保证存档可用），
