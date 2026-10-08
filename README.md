@@ -4,84 +4,35 @@
 
 An MCP server that lets AI agents **play, test and QA Twine / interactive-fiction HTML games**.
 
-The agent reads the current passage, sees numbered choices, clicks them, watches story
-variables, screenshots the game, and can save/restore state to explore branches — all
-through a small, token-friendly tool surface instead of a generic browser automation API.
+The agent reads the current passage, clicks numbered choices, fills inputs, watches story
+variables, answers game dialogs, snapshots state to explore branches, and can hand the user a
+live view of the real page — through a small, token-friendly tool surface instead of generic
+browser automation.
 
 ```
 Agent  ──MCP(stdio)──>  twine-play-mcp  ──Playwright──>  headless Chrome
                               │                               │
-                              │  static server (127.0.0.1)    │  injected bridge
+                              │  static server (127.0.0.1)    │  injected page bridge
                               └────────> game HTML <──────────┘
 ```
 
-## Why not a generic browser MCP?
-
-Generic browser MCPs make the model guess DOM selectors, dump whole pages into context
-and have no notion of "story state". This server adds a semantic layer:
-
-- **Passage view**: text as Markdown, passage name, format/version, story metadata
-- **Numbered choices** with target passage names (and external-link blocking)
-- **Story variables** (SugarCube `State.variables`) with safe depth/size caps
-- **Native state**: SugarCube `Engine.backward/forward`, `Save.base64` snapshots
-- **Format detection**: SugarCube first, DOM fallback for Harlowe / Snowman / Chapbook / unknown
-- **Tracker blocking** and quiet console/network capture for clean playtesting
-
 ## Requirements
 
-- Node.js >= 20 (developed on 26)
-- Google Chrome installed (uses `channel: 'chrome'`; no 200 MB browser download)
-- Linux/macOS/Windows
+- **Node.js ≥ 20**
+- **Google Chrome** installed (used via `channel: 'chrome'` — no 200 MB browser download)
+- Linux, macOS or Windows
 
 ## Install
 
 ```bash
-npm install -g twine-play-mcp   # or: npx twine-play-mcp
+npm install -g twine-play-mcp   # or run it with: npx twine-play-mcp
 ```
 
-No build step, no browser download — the package ships the compiled server and the page
-bridge, and drives the Chrome you already have.
+The package ships the compiled server and the page bridge, so there is no build step.
 
-Then point it at any published Twine HTML file (or a folder containing the game + assets):
+## Configure
 
-```bash
-twine-play-mcp         # MCP server on stdio
-```
-
-### From source (for development)
-
-```bash
-git clone https://github.com/adorablelovelymia/twine-play-mcp.git
-cd twine-play-mcp
-npm install
-npm run build          # compiles to dist/ and copies the page bridge
-
-# sanity checks (optional)
-npm run spike          # 17 end-to-end checks against a real SugarCube game
-npm run smoke          # spawns the MCP server over stdio and drives it with the MCP SDK
-```
-
-## Client configuration
-
-The snippets below use `npx`, so no global install is required. If you installed globally,
-replace `"npx"` + `"twine-play-mcp"` with `"twine-play-mcp"` on its own.
-
-### OpenCode (`~/.config/opencode/opencode.json`)
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "twine-play": {
-      "type": "local",
-      "command": ["npx", "-y", "twine-play-mcp"],
-      "enabled": true
-    }
-  }
-}
-```
-
-### Claude Desktop / Cursor / any `mcpServers` client
+Add the server to your MCP client. Any `mcpServers`-style client works:
 
 ```json
 {
@@ -94,191 +45,160 @@ replace `"npx"` + `"twine-play-mcp"` with `"twine-play-mcp"` on its own.
 }
 ```
 
-Environment variables:
+OpenCode uses its own shape (`~/.config/opencode/opencode.json`):
 
-| Variable | Purpose |
-| --- | --- |
-| `TWMCP_CHROME_PATH` | Chrome executable if `channel: 'chrome'` cannot find it |
-| `TWMCP_DOWNLOAD_DIR` | Folder where browser downloads are captured (default `~/.cache/twine-play-mcp/downloads`) |
-| `TWMCP_VIEW_PORT` / `TWMCP_VIEW_HOST` | Live-view server port (default `4571`, auto-increments if busy) and bind host (default `127.0.0.1`) |
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "twine-play": { "type": "local", "command": ["npx", "-y", "twine-play-mcp"], "enabled": true }
+  }
+}
+```
+
+Ready-made files live in [`examples/`](examples). Environment variables — all optional:
+
+- `TWMCP_CHROME_PATH` — Chrome executable, if `channel: 'chrome'` cannot find it
+- `TWMCP_DOWNLOAD_DIR` — where browser downloads are captured (default `~/.cache/twine-play-mcp/downloads`, with automatic fallback if unwritable)
+- `TWMCP_VIEW_HOST` / `TWMCP_VIEW_PORT` — live-view bind host (default `127.0.0.1`) and first port (default `4571`, auto-increments)
+- `TWMCP_BLOCK_TRACKERS` — set to `0` to stop blocking analytics hosts during playtesting
+
+## Quick start
+
+Ask your agent to do this — **the game path is an argument to the `open_game` tool, not a CLI
+argument**. There is no `twine-play-mcp game.html`.
+
+> Open `/path/to/game.html` with twine-play-mcp and tell me what the first passage says.
+
+What happens under the hood, and what the agent sees:
+
+```
+open_game({ source: "/path/to/game.html" })
+  Opened game "game_c5ac1a" (/path/to/game.html)
+  game_id: game_c5ac1a
+  Story: TS Ero Trap Dungeon · Format: sugarcube 2.31.1 · ifid: ...
+  Served from: http://127.0.0.1:41235/
+  [sugarcube 2.31.1 · step 0 · engine=idle · passage: Title]
+  ...
+  Choices (1):
+    1. Start -> Prologue
+
+choose({ choice: 1 })          # or click_ui / interact / navigate
+  Clicked: "Start" -> Prologue
+  [sugarcube 2.31.1 · step 1 · engine=idle · passage: Prologue]
+  ...
+
+observe({ for_text: "You wake up" })    # wait for a timed passage, then read
+interact({ ref: "i1", value: "Shiori" }) # fill a form field
+snapshot({ action: "save", name: "before-boss" })
+live_view({})                  # hand the user a URL to watch the real page
+```
+
+`game_id` is optional while exactly one game is open — omit it for less noise. With several games
+open you must pass it, and the error lists the candidates.
 
 ## Tools
 
+The surface is deliberately small: related verbs live together rather than each getting a
+tool (`navigate` covers back/restart/goto, `snapshot` covers save/load/list, `get_logs` covers
+console + journal). Types with one knob fold into `action:` / `kind:` parameters.
+
+<!-- tools:begin -->
+**Open & read**
+
 | Tool | What it does |
 | --- | --- |
-| `open_game` | Open a local HTML file/folder or URL; optional PRNG seed; returns first observation |
-| `observe` | Passage text, numbered choices, inputs (paginated windows of 40 with `inputs_offset`), dialog, status bar; `since_last` saves tokens; `format:"json"` for structured output |
-| `choose` | Click by 1-based number or label; works for passage choices *and* dialog buttons; `expected` guard; external links blocked by default |
-| `wait` | Wait for ms / for text / for the DOM to settle |
-| `interact` | Fill inputs/selects/checkboxes by ref, or press a key |
-| `find_ui` | Find buttons/links/**labels**/inputs by visible text or input name; returns refs for `click_ui`/`interact`. The fastest way to reach radio/checkbox options (SugarCube macro labels) |
-| `click_ui` | Click dialogs, sidebar and menus (by ref / CSS selector / visible text), including `<label>`-based controls and iframes |
-| `upload_file` | Upload a local file into an `<input type=file>` (mod .zip, .save import) via trigger button or direct input, frame-aware |
-| `download_file` | Browser file control (any game): copy a captured download to a path — by `trigger_text`/`trigger_ref` (click the game's download button), by `name`/`index` from the download folder, or the newest file by default. The folder copy stays |
-| `list_downloads` | List files captured into the tool's persistent download folder (survives sessions/restarts), with name, size, time and absolute path |
-| `inspect_ui` | Inspect or discover UI panels outside the passage (mod GUIs, backstage); lists buttons/inputs and file inputs |
-| `get_variables` | Read story variables by dot path (`V.hairlength`), or a shallow top-level key summary; avoids dumping the whole variable state |
-| `back` | Undo one passage (SugarCube `Engine.backward`) |
-| `restart` | Restart from the beginning, optionally reseeding the PRNG |
-| `save_state` / `load_state` | Named in-session snapshots for branch exploration |
-| `screenshot` | PNG of the viewport (canvas/visual games, visual QA); pass `path` to save to disk |
-| `live_view` | Give the user eyes on the real page: local URL streaming JPEG frames (~1/s) of the actual Playwright tab + passage/step/journal; works headless; `open:true` launches the default browser |
-| `get_console_errors` | JS exceptions, console errors and HTTP failures captured from the page |
-| `get_journal` | Action history: passages visited, choices taken, coverage counts |
-| `list_games` / `close_game` | Session management |
+| `open_game` | Open a local file/folder or an http(s) URL and get the first observation. |
+| `observe` | Current passage text, choices, inputs, dialog and status. Pass `for_text` or `wait_ms` to wait first. |
+| `session` | `list` the open games, or `close` one. |
 
-### Watching the page (live view)
+**Act**
 
-`live_view(game_id)` starts a tiny local server (once per MCP process, port 4571+) and returns a URL
-like `http://127.0.0.1:4571/v/game_abc`. Open it in any browser (or pass `open: true`) to watch the
-**actual tab the agent is driving** — a JPEG frame about once per second, plus passage, step, engine
-state, recent actions and the passage text. It works with headless games, frames are captured only
-while somebody is watching, and closing the game stops it. For a raw browser window instead, open the
-game with `headless: false` (`open_game`).
+| Tool | What it does |
+| --- | --- |
+| `choose` | Click a choice by its 1-based number or by label — dialog buttons included. |
+| `click_ui` | Click sidebar buttons and menus by ref, CSS selector or visible text. |
+| `interact` | Fill an input/select/checkbox by ref, or press a key. |
+| `navigate` | `back` one passage, `restart` the story, or `goto` a named passage. |
 
-Handy combo: if your client can show a web page in a side pane (e.g. OpenCode's Review pane /
-`browser.tabs.open`), point it at the live-view URL and you can follow along while the agent plays.
+**Inspect**
 
-**Pick one view (agents).** To keep the user's screen clean, show a running game through exactly one
-channel — never stack them:
+| Tool | What it does |
+| --- | --- |
+| `find_ui` | Find controls by text or input name; inspect a DOM subtree or discover overlay panels. |
+| `get_variables` | Read SugarCube `State.variables` by dot path, or a shallow key summary. |
+| `get_logs` | Console errors/HTTP failures and the play journal. |
+| `screenshot` | PNG of the viewport — canvas games and visual QA. |
+| `live_view` | Let the user watch the real page in their browser (~1 fps). |
 
-1. **Default:** `live_view` — hand the URL to the user, or pass `open: true` once to launch it for
-   them. Repeated calls reuse the same view and never open another tab.
-2. **Only on explicit request:** `open_game(headless: false)` when the user asks for a real browser
-   window. Don't add a live view on top; a headed window is already visible.
-3. `screenshot` is a one-shot visual check, **not** a stream — don't loop it to "show" the game.
+**Files & state**
 
-If a view (live view tab or headed window) is already open, reuse it instead of starting a second
-one. The MCP server ships this same policy in its `instructions` field, so MCP clients can pass it
-to the model automatically; the tool descriptions repeat it where it matters (`live_view`,
-`open_game.headless`, `screenshot`).
+| Tool | What it does |
+| --- | --- |
+| `snapshot` | `save` / `load` / `list` in-session state snapshots for branch exploration. |
+| `upload_file` | Upload a mod `.zip`, `.save` or image into an `<input type=file>`. |
+| `download_file` | `list` the persistent download folder, or `save`/`newest` a captured file. |
+<!-- tools:end -->
 
-### Agent ergonomics
+Detail for any tool is in its own description — call it and read the parameters. Output is
+formatted text for humans and models; pass `format: "json"` for `JSON.parse`-able output
+(`observe`, `choose`, `click_ui`, `interact`, `navigate`, `snapshot`, `upload_file`,
+`download_file`, `open_game`).
 
-- **Output**: every play tool returns a formatted text observation (a string). Pass `format:"json"`
-  to receive a JSON string instead (`JSON.parse` it) with `passage`, `text`, `choices[{n,label,target}]`,
-  `inputs[{ref,kind,label,checked}]`, `inputsTotal`, `dialog`, `status`.
-- **Inputs are paginated, not truncated**: a header like `Inputs (41-80 of 140)` plus
-  `inputs_offset=80` means everything is reachable — no silent hard cap.
-- **Label matching**: `click_ui(text)` and `find_ui(text)` understand SugarCube `<<radiobutton>>` /
-  `<<checkbox>>` labels, so options like "Jet black" or combat moves like "Punch" are clickable by text.
-- **Errors are compact**: failures return `ERROR: code — message`, a `Hint`, the current passage and the
-  available choices — never a full observation dump.
-- **Variables**: observations do not embed variable blobs by default; use `get_variables` for the keys
-  you care about. `include_variables:true` is still available when you want the (truncated) dump.
-- **Dialogs**: dialog buttons appear as numbered choices tagged `[dialog]`, and a `Dialog buttons:` line
-  lists them; checkbox labels are shown on the input line.
+## Watching the page
 
+`live_view` starts a tiny local server (once per MCP process) and returns a URL like
+`http://127.0.0.1:4571/v/game_c5ac1a`. Open it and you watch the **actual tab the agent is
+driving**: a JPEG frame roughly once a second, plus passage, step, engine state and recent actions.
+It works with headless games, and frames are only captured while somebody is watching.
+
+**Agents: pick exactly one view per game.** Use `live_view` by default (pass `open: true` once if
+the user wants you to launch it). Use `open_game({ headless: false })` only when the user asks for a
+real browser window, and do not add a live view on top of it. `screenshot` is a one-shot visual
+check, never a stream. The server ships this policy in its MCP `instructions` field too.
 
 ## Format support
 
-| Format | Detect | Text/choices | Variables | Passage name | Back | Snapshots |
+| Format | Detect | Text / choices | `get_variables` | Passage name | `navigate(back)` | `snapshot` |
 | --- | --- | --- | --- | --- | --- | --- |
-| **SugarCube 2.21+** | ✅ | ✅ | ✅ `State.variables` | ✅ | ✅ `Engine.backward` | ✅ `Save.base64` (2.37+) / `Save.deserialize` (older) |
+| **SugarCube 2.21+** | ✅ | ✅ | ✅ `State.variables` | ✅ | ✅ `Engine.backward` | ✅ `Save.base64` / `Save.deserialize` |
 | **Harlowe 3** | ✅ | ✅ | — (engine internals are private) | — | ✅ sidebar undo | — |
-| **Snowman 2** | ✅ | ✅ | ✅ `story.state` | ✅ | — | ✅ state JSON |
-| **Chapbook 1** | ✅ | ✅ | ✅ `engine.state.saveToObject()` | ✅ `trail` | — | ✅ `restoreFromObject` |
+| **Snowman 2** | ✅ | ✅ | — (use `observe(include_variables:true)`) | ✅ | — | ✅ state JSON |
+| **Chapbook 1** | ✅ | ✅ | — (use `observe(include_variables:true)`) | ✅ `trail` | — | ✅ `restoreFromObject` |
 | **Unknown HTML** | generic | ✅ DOM heuristics | — | — | — | — |
 
-Everything degrades gracefully: an unknown or exotic format still plays with the generic DOM
-path; format-specific tools report `unsupported` instead of failing.
+`observe` reads variables for Snowman (`story.state`) and Chapbook (`engine.state`) as well; only
+`get_variables`' dot-path lookup is SugarCube-specific. Everything degrades gracefully: an unknown
+format still plays through the generic DOM path, and format-specific tools report `unsupported`
+instead of failing.
 
-## Play-session example (what the agent sees)
+## Troubleshooting
 
-```
-[sugarcube 2.37.3 · step 3 · engine=idle · passage: 069]
-You squeeze through the narrow gap...
-
-Choices (2):
-  1. Go deeper -> 070
-  2. Check the mirror
-
-Status:
-Resistance: 500/500
-Variables: {"resistance":500,"pleasure":0,"degradation":0,...}
-```
-
-## How it works
-
-- `src/bridge/bridge.js` is injected into every page (`addInitScript`) and exposes
-  `window.__twineMCP`: format detection, passage/choice extraction, click/fill helpers,
-  settle-waiting, snapshots and seeding. All server calls go through this bridge only.
-- `src/session.ts` owns the browser, one `BrowserContext` per game (isolated saves) and a
-  tiny static server so local games run on `http://127.0.0.1` (localStorage works).
-- `src/render.ts` turns observations into compact Markdown for the model.
-- Choices get temporary `data-twmcp-ref` attributes; the server prefers real Playwright
-  clicks and falls back to DOM clicks for exotic macro-generated links.
-- Spoiler policy: only what a player can see is returned. No passage lists or source
-  dumps are exposed.
-
-## Complex games
-
-Real games are not just passages and links. The MCP handles the awkward parts:
-
-- **Modal dialogs** (SugarCube `#ui-dialog`, content gates, settings): their text appears as a
-  `Dialog:` block and their buttons/inputs are numbered like choices, so the agent can tick a
-  consent checkbox (`interact`) and click `Enter` (`choose`).
-- **Iframes**: mod managers and dev panels often live in a child frame. `inspect_ui` discovers
-  them (marked `[iframe]`), `click_ui` by text and `upload_file` search every frame.
-- **File workflows**: uploads go through `upload_file` (mod `.zip`, save import) — by clicking a
-  trigger (`trigger_text` / `trigger_selector`, e.g. `#saves-import`) or pointing at an
-  `<input type=file>` directly. Downloads go the other way through a persistent download folder:
-  every browser download is captured there (`TWMCP_DOWNLOAD_DIR` overrides the location),
-  `list_downloads` shows the contents, and `download_file` copies one anywhere (`path`, default
-  `<cwd>/downloads/<name>`) — either by clicking the game's export button or by `name`/`index`
-  afterwards. No manual temp-folder copying, and files survive `close_game` and MCP restarts.
-- **DoL case study**: `test/fixtures` aside, `scripts/dol-mcp-test.ts` drives Degrees of
-  Lewdity end to end — consent gate → importing `ModI18N.mod.zip` and
-  `GameOriginalImagePack.mod.zip` through the in-game ModLoader GUI → page reload → importing
-  a real `.save` through the SAVES dialog → several turns of normal play.
-
-## Tests
-
-```bash
-npm run spike      # 17 checks against a real SugarCube 2.37 game (play, back, snapshot, screenshot)
-npm run formats    # 4 compiled fixtures: SugarCube 2.30, Harlowe 3.1, Snowman 2.0, Chapbook 1.0
-npm run smoke      # spawns the built MCP server and drives the tools over stdio
-npm run clarity    # agent-ergonomics regression on DoL character creation (pagination, labels, variables)
-npm run fixtures   # rebuild test/fixtures/compiled/*.html with Tweego (see test/fixtures/build.sh)
-npx tsx scripts/dol-mcp-test.ts   # Degrees of Lewdity: gate, mod import, save import, play
-```
-
-`scripts/inspect.ts <fixture>` dumps the DOM/story-format internals of a game — handy when
-adding a new adapter.
-
-## Status / roadmap
-
-- [x] M1: SugarCube adapter, generic DOM fallback, observation/choice/input/wait/screenshot,
-      snapshots, backtracking, console+network QA capture, stdio MCP, spike + smoke tests
-- [x] M2: Harlowe / Chapbook / Snowman adapters verified against compiled fixtures
-- [x] M2: play journal (`get_journal`) for run summaries, resuming and QA coverage
-- [x] M3: dialogs/iframe-aware UI control (`click_ui`, `inspect_ui`, `upload_file`) — verified on
-      Degrees of Lewdity (mod import + save import + play)
-- [x] M4: agent ergonomics — input pagination + totals, `find_ui` label search, `get_variables`,
-      `format:"json"`, compact errors (driven by a naive-agent playtest that stalled on DoL
-      character creation)
-- [x] M4: file workflows both ways — `upload_file` for mods/saves, `download_file` + `list_downloads`
-      for a persistent browser download folder (no temp-folder copying)
-- [x] M5: live view — watch the real page in any browser (~1 fps frames + passage/step/journal);
-      headed mode via `open_game(headless: false)`
-- [x] M5: npm packaging — published as [`twine-play-mcp`](https://www.npmjs.com/package/twine-play-mcp)
-- [ ] M3: `click_at` for canvas games, spoiler-gated story-map analysis
+- **`Could not launch Chrome`** — install Google Chrome, or point `TWMCP_CHROME_PATH` at the binary.
+- **`Multiple HTML files in <dir>`** — pass the specific `.html` file instead of the folder.
+- **Nothing happens with the file path** — the path goes to `open_game`; the CLI takes no arguments.
+- **Live view port busy** — it auto-increments from 4571; use the URL that was returned.
+- **Downloads not appearing** — read the folder path printed by `download_file(action:"list")`; it falls back to a writable location.
+- **A tool reports `unsupported`** — that story format lacks the API (see the matrix above).
 
 ## Safety notes
 
-- Page scripts run in Chrome's sandbox; the bridge never exposes Node to the page.
-- No arbitrary `eval` tool is exposed to the agent.
-- Analytics/tracker hosts are blocked by default (`block_trackers: false` to disable).
-- External links are blocked unless `allow_external: true` is passed.
+- Page scripts run in Chrome's sandbox; the bridge never exposes Node to the page. No arbitrary `eval` tool is exposed.
+- Analytics/tracker hosts are blocked by default (`TWMCP_BLOCK_TRACKERS=0` to disable).
+- Links that leave the game are blocked unless `allow_external: true`. `open_game` serves a local game over `127.0.0.1` and reads files under the served root only.
 
-## 中文文档
-
-完整中文版见 **[README-zh.md](README-zh.md)**（工具一览、客户端配置、格式支持、实时视图策略等均已翻译）。
-
-一句话：这是一个让 AI agent 游玩 / 测试 Twine 文字游戏的 MCP 服务——无头 Chrome + 页面桥，
-22 个工具，本地游戏经内置静态服务器以 `http://127.0.0.1` 打开（保证存档可用），
-`live_view` 让你用任意浏览器实时看到 AI 正在操作的真实页面。
+## Development
 
 ```bash
-npm install -g twine-play-mcp   # 或 npx twine-play-mcp
+git clone https://github.com/adorablelovelymia/twine-play-mcp.git
+cd twine-play-mcp
+npm install
+npm test            # build + 4-format fixture checks + tool-surface snapshot/budget
 ```
+
+`npm test` needs no external game — the fixtures are in the repo. Heavier checks
+(`npm run smoke`, `npm run spike`, `npm run clarity`) drive a real game and need
+`TWMCP_GAME=/path/to/game.html`; without it they skip.
+
+Architecture, the playbook for adding a story-format adapter, the script index and the roadmap
+are in **[CONTRIBUTING.md](CONTRIBUTING.md)**.

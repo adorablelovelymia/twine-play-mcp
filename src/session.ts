@@ -149,15 +149,61 @@ function bridgeSource(): string {
   throw new Error('bridge.js not found; the package is missing src/bridge/bridge.js');
 }
 
+/** Where a resolved download folder came from — surfaced so callers can explain a fallback. */
+export interface DownloadsDir {
+  dir: string;
+  /** True when the preferred folder was unusable and a fallback was chosen. */
+  fellBack: boolean;
+  /** Why the preferred folder failed, when it did. */
+  reason: string | null;
+}
+
+let downloadsDirCache: DownloadsDir | null = null;
+
 /**
- * Fixed folder where every browser download lands. Unlike Playwright's anonymous temp dir,
- * it survives sessions and MCP restarts, so captured files can always be listed and exported.
- * Override with TWMCP_DOWNLOAD_DIR.
+ * Folder where every browser download lands. Unlike Playwright's anonymous temp dir it survives
+ * sessions and MCP restarts, so captured files can always be listed and exported.
+ *
+ * The preferred location is `TWMCP_DOWNLOAD_DIR`, else `~/.cache/twine-play-mcp/downloads`.
+ * Caches and home directories are frequently read-only (containers, CI sandboxes, hardened
+ * setups), so an unusable folder must not break downloads: we fall back down the list and
+ * report which folder we actually got. The result is resolved once and reused.
  */
+export function resolveDownloadsDir(): DownloadsDir {
+  if (downloadsDirCache) return downloadsDirCache;
+  const first = process.env.TWMCP_DOWNLOAD_DIR ?? path.join(os.homedir(), '.cache', 'twine-play-mcp', 'downloads');
+  const candidates = [
+    first,
+    path.join(os.tmpdir(), 'twine-play-mcp', 'downloads'),
+    path.join(process.cwd(), 'downloads')
+  ];
+  let reason: string | null = null;
+  for (const dir of candidates) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const probe = path.join(dir, `.twmcp-write-probe-${process.pid}`);
+      fs.writeFileSync(probe, '');
+      fs.unlinkSync(probe);
+    } catch (err) {
+      reason = `${dir}: ${String((err as Error)?.message ?? err)}`;
+      continue;
+    }
+    downloadsDirCache = { dir, fellBack: dir !== first, reason: dir === first ? null : reason };
+    return downloadsDirCache;
+  }
+  // Nothing writable: keep the preferred path so error messages stay actionable.
+  downloadsDirCache = { dir: first, fellBack: false, reason };
+  return downloadsDirCache;
+}
+
+/** Path of the download folder (first call resolves and caches it). */
 export function downloadsDir(): string {
-  const dir = process.env.TWMCP_DOWNLOAD_DIR ?? path.join(os.homedir(), '.cache', 'twine-play-mcp', 'downloads');
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
+  return resolveDownloadsDir().dir;
+}
+
+/** Test hook: forget the resolved folder so a new TWMCP_DOWNLOAD_DIR takes effect. */
+export function resetDownloadsDirCache(): void {
+  downloadsDirCache = null;
 }
 
 const isUrl = (s: string) => /^https?:\/\//i.test(s);
@@ -322,6 +368,32 @@ export class SessionManager {
     return session;
   }
 
+  /**
+   * Resolve the session a tool call applies to.
+   *
+   * `game_id` is optional everywhere because with a single open game it carries no information —
+   * making the agent repeat it is pure friction, and forgetting it used to be a hard error. With
+   * two or more games open the id is genuinely required, so we say so and list the candidates.
+   */
+  resolve(id?: string): GameSession {
+    if (id) return this.get(id);
+    if (this.sessions.size === 1) return [...this.sessions.values()][0]!;
+    if (this.sessions.size === 0) throw new Error('No open games. Call open_game first.');
+    const known = [...this.sessions.keys()].join(', ');
+    throw new Error(`game_id is required with ${this.sessions.size} open games (${known}). Pass game_id, or close the others.`);
+  }
+
+  /** One line per open session, for the `session` tool and error messages. */
+  listSessions(): Array<{ id: string; title: string; format: string; step: number; source: string }> {
+    return [...this.sessions.values()].map((s) => ({
+      id: s.id,
+      title: s.lastObservation?.story?.title ?? s.lastObservation?.title ?? '(unknown)',
+      format: s.lastObservation?.format ?? '?',
+      step: s.step,
+      source: s.source
+    }));
+  }
+
   async bridge<T = BridgeResult>(session: GameSession, fn: string, arg?: unknown): Promise<T> {
     const result = await session.page.evaluate(
       ([name, value]) => {
@@ -357,6 +429,13 @@ export class SessionManager {
       inputsOffset: opts.inputsOffset ?? 0,
       inputsLimit: opts.inputsLimit ?? 40
     });
+    // A failed bridge call returns `{ok:false, error:'bridge-missing'}` — not an observation.
+    // Storing it would poison session.lastObservation (every later action reads it) and the
+    // renderer would then trip over missing fields, so fail loudly and keep the last good state.
+    if (!obs || obs.ok === false) {
+      const detail = (obs as BridgeResult | undefined)?.message ?? (obs as BridgeResult | undefined)?.error ?? 'no result';
+      throw new Error(`page bridge unavailable: ${detail}`);
+    }
     session.lastObservation = obs;
     return obs;
   }
@@ -521,10 +600,16 @@ export class SessionManager {
     return { ok: true, observation };
   }
 
+  /** Main frame first, then child frames (iframes). Everything that scans the DOM wants this order. */
+  private framesOf(session: GameSession): Frame[] {
+    const main = session.page.mainFrame();
+    return [main, ...session.page.frames().filter((f) => f !== main)];
+  }
+
   /** Resolve a target inside one frame using that frame's injected bridge (fast, value-aware). */
   private async resolveInFrame(
     frame: Frame,
-    q: { selector?: string; text?: string; exact?: boolean }
+    q: { selector?: string; text?: string; exact?: boolean; target?: string }
   ): Promise<{ ref: string; label?: string; matches?: number; alternatives?: string[] } | null> {
     try {
       const res = (await frame.evaluate((arg) => {
@@ -542,11 +627,9 @@ export class SessionManager {
   /** Resolve a target by CSS selector or visible text across the main frame and all child frames. */
   private async resolveAcrossFrames(
     session: GameSession,
-    q: { selector?: string; text?: string; exact?: boolean }
+    q: { selector?: string; text?: string; exact?: boolean; target?: string }
   ): Promise<{ frame: Frame; ref: string; label: string; matches: number; alternatives?: string[] } | null> {
-    const main = session.page.mainFrame();
-    const frames: Frame[] = [main, ...session.page.frames().filter((f) => f !== main)];
-    for (const frame of frames) {
+    for (const frame of this.framesOf(session)) {
       const hit = await this.resolveInFrame(frame, q);
       if (hit) {
         return { frame, ref: hit.ref, label: hit.label ?? '', matches: hit.matches ?? 1, alternatives: hit.alternatives };
@@ -570,7 +653,7 @@ export class SessionManager {
   /** Click UI outside the passage (dialogs, sidebar, menus, iframes) by ref, CSS selector or visible text. */
   async clickUi(
     session: GameSession,
-    target: { ref?: string; selector?: string; text?: string; exact?: boolean }
+    target: { ref?: string; selector?: string; text?: string; exact?: boolean; target?: string }
   ): Promise<{ ok: boolean; error?: string; message?: string; label?: string; matches?: number; alternatives?: string[]; observation?: Observation }> {
     // Fast path: JS-side resolution in the main frame. Essential on huge pages where
     // Playwright's text engine is slow (100k+ DOM nodes).
@@ -631,24 +714,19 @@ export class SessionManager {
   /** Upload a local file into an <input type=file> (mods, save imports, …), optionally via a trigger button. */
   async uploadFile(
     session: GameSession,
-    opts: { path: string; ref?: string; selector?: string; triggerRef?: string; triggerText?: string; triggerSelector?: string }
+    opts: { path: string; ref?: string; selector?: string; trigger?: string; triggerRef?: string; triggerText?: string; triggerSelector?: string }
   ): Promise<{ ok: boolean; error?: string; message?: string; observation?: Observation }> {
     const filePath = path.resolve(opts.path);
     if (!fs.existsSync(filePath)) return { ok: false, error: 'file-not-found', message: filePath };
 
-    if (opts.triggerRef || opts.triggerText || opts.triggerSelector) {
+    if (opts.trigger || opts.triggerRef || opts.triggerText || opts.triggerSelector) {
       const chooserPromise = session.page.waitForEvent('filechooser', { timeout: 4000 }).catch(() => null);
-      let clicked: { ok: boolean; error?: string; message?: string; observation?: Observation };
-      if (opts.triggerSelector) {
-        try {
-          await session.page.locator(opts.triggerSelector).first().click({ timeout: 3000 });
-          clicked = { ok: true };
-        } catch (err) {
-          clicked = { ok: false, error: 'click-failed', message: String((err as Error)?.message ?? err) };
-        }
-      } else {
-        clicked = await this.clickUi(session, { ref: opts.triggerRef, text: opts.triggerText });
-      }
+      const clicked = await this.clickUi(session, {
+        ref: opts.triggerRef,
+        text: opts.triggerText,
+        selector: opts.triggerSelector,
+        target: opts.trigger
+      });
       if (!clicked.ok) return { ok: false, error: clicked.error, message: clicked.message, observation: clicked.observation };
       const chooser = await chooserPromise;
       if (chooser) {
@@ -660,10 +738,8 @@ export class SessionManager {
     }
 
     const selector = opts.ref ? `[data-twmcp-ref="${opts.ref}"]` : opts.selector ?? 'input[type="file"]';
-    const main = session.page.mainFrame();
-    const frames: Frame[] = [main, ...session.page.frames().filter((f) => f !== main)];
     let lastErr = '';
-    for (const frame of frames) {
+    for (const frame of this.framesOf(session)) {
       const locators = frame.locator(selector);
       const count = await locators.count().catch(() => 0);
       if (!count) continue;
@@ -688,7 +764,7 @@ export class SessionManager {
 
   /**
    * Every browser download is persisted into the tool's download folder (downloadsDir) as it
-   * arrives, so files keep their real names and survive close_game and MCP restarts.
+   * arrives, so files keep their real names and survive closing the game and MCP restarts.
    */
   private attachDownloads(session: GameSession): void {
     session.page.on('download', (download) => {
@@ -733,10 +809,13 @@ export class SessionManager {
   async listDownloads(limit = 20): Promise<{
     ok: boolean;
     dir: string;
+    fellBack: boolean;
+    fallbackReason: string | null;
     total: number;
     files: Array<{ name: string; path: string; bytes: number; mtime: number }>;
   }> {
-    const dir = downloadsDir();
+    const resolved = resolveDownloadsDir();
+    const dir = resolved.dir;
     let names: string[] = [];
     try {
       names = fs.readdirSync(dir);
@@ -755,15 +834,27 @@ export class SessionManager {
     }
     files.sort((a, b) => b.mtime - a.mtime);
     const capped = Math.max(1, Math.min(limit, 200));
-    return { ok: true, dir, total: files.length, files: files.slice(0, capped) };
+    return {
+      ok: true,
+      dir,
+      fellBack: resolved.fellBack,
+      fallbackReason: resolved.reason,
+      total: files.length,
+      files: files.slice(0, capped)
+    };
   }
 
-  /** Where a copy should land: an explicit file, an existing directory, or <cwd>/downloads/<name>. */
-  private resolveDownloadPath(target: string | undefined, suggested: string): string {
+  /**
+   * Where a copy should land.
+   *
+   * `destIsDir` comes from the caller's choice of parameter (`dest_dir` vs `dest_file`), because a
+   * destination that does not exist yet cannot be told apart from a file name by inspection alone.
+   */
+  private resolveDownloadPath(target: string | undefined, suggested: string, destIsDir = false): string {
     const safeName = (suggested || 'download.bin').replace(/[/\\]/g, '_').trim() || 'download.bin';
     if (!target) return path.resolve(process.cwd(), 'downloads', safeName);
     const abs = path.resolve(target);
-    const looksLikeDir = /[/\\]$/.test(target) || (fs.existsSync(abs) && fs.statSync(abs).isDirectory());
+    const looksLikeDir = destIsDir || /[/\\]$/.test(target) || (fs.existsSync(abs) && fs.statSync(abs).isDirectory());
     return looksLikeDir ? path.join(abs, safeName) : abs;
   }
 
@@ -776,7 +867,17 @@ export class SessionManager {
    */
   async downloadFile(
     session: GameSession,
-    opts: { path?: string; ref?: string; text?: string; selector?: string; name?: string; index?: number; timeoutMs?: number } = {}
+    opts: {
+      path?: string;
+      destIsDir?: boolean;
+      ref?: string;
+      text?: string;
+      selector?: string;
+      target?: string;
+      name?: string;
+      index?: number;
+      timeoutMs?: number;
+    } = {}
   ): Promise<{
     ok: boolean;
     error?: string;
@@ -793,10 +894,10 @@ export class SessionManager {
     let sourcePath: string | null = null;
     let filename = '';
 
-    if (opts.ref || opts.text || opts.selector) {
+    if (opts.ref || opts.text || opts.selector || opts.target) {
       const dlPromise = session.page.waitForEvent('download', { timeout });
       dlPromise.catch(() => undefined); // avoid an unhandled rejection when the click fails
-      const clicked = await this.clickUi(session, { ref: opts.ref, text: opts.text, selector: opts.selector });
+      const clicked = await this.clickUi(session, { ref: opts.ref, text: opts.text, selector: opts.selector, target: opts.target });
       if (!clicked.ok) {
         return { ok: false, error: clicked.error ?? 'click-failed', message: clicked.message, observation: clicked.observation };
       }
@@ -842,7 +943,7 @@ export class SessionManager {
           return {
             ok: false,
             error: 'no-download',
-            message: `No file in the download folder matches "${opts.name}". Use list_downloads to see the ${listed.total} captured file(s).`
+            message: `No file in the download folder matches "${opts.name}". Use download_file(action:"list") to see the ${listed.total} captured file(s).`
           };
         }
       } else {
@@ -861,7 +962,7 @@ export class SessionManager {
           ok: false,
           error: 'no-download',
           message:
-            `The download folder is empty (${listed.dir}). Pass trigger_text/trigger_ref/trigger_selector to click a download button, ` +
+            `The download folder is empty (${listed.dir}). Pass trigger to click the download button, ` +
             'or trigger a download first and call download_file again.'
         };
       }
@@ -874,7 +975,7 @@ export class SessionManager {
     let copied = false;
     try {
       if (opts.path) {
-        dest = this.resolveDownloadPath(opts.path, filename);
+        dest = this.resolveDownloadPath(opts.path, filename, opts.destIsDir ?? false);
         fs.mkdirSync(path.dirname(dest), { recursive: true });
         overwrote = fs.existsSync(dest);
         if (path.resolve(dest) !== path.resolve(sourcePath)) {
@@ -952,8 +1053,7 @@ export class SessionManager {
       candidates?: unknown[];
     }>(session, 'inspectUi', { selector });
 
-    const main = session.page.mainFrame();
-    const childFrames = session.page.frames().filter((f) => f !== main);
+    const childFrames = session.page.frames().filter((f) => f !== session.page.mainFrame());
 
     if (!selector) {
       const frameCandidates: Array<Record<string, unknown>> = [];
@@ -1067,6 +1167,28 @@ export class SessionManager {
     session.step = 0;
     session.journal.push({ step: 0, passage: null, action: seed ? `(restart seed=${seed})` : '(restart)', target: null, at: Date.now() });
     return { ok: true, observation: await this.observe(session), seeded: !!seed };
+  }
+
+  /** List the in-session snapshots, newest first. */
+  listSnapshots(session: GameSession): Array<{ name: string; bytes: number; at: number }> {
+    return [...session.snapshots.entries()]
+      .map(([name, snap]) => ({ name, bytes: snap.data.length, at: snap.at }))
+      .sort((a, b) => b.at - a.at);
+  }
+
+  /**
+   * Jump straight to a passage by name (SugarCube `Engine.play`, Snowman `story.show/go`,
+   * Harlowe `Engine.goTo`). Intended for QA: reaching a specific passage without replaying
+   * the path that leads there.
+   */
+  async goTo(session: GameSession, passage: string): Promise<{ ok: boolean; observation?: Observation; error?: string; message?: string }> {
+    const res = await this.bridge<BridgeResult>(session, 'goTo', passage);
+    if (!res.ok) return { ok: false, error: res.error ?? 'goto-failed', message: res.message };
+    await this.waitStable(session);
+    session.step += 1;
+    const observation = await this.observe(session);
+    session.journal.push({ step: session.step, passage: observation.passage, action: `(goto:${passage})`, target: passage, at: Date.now() });
+    return { ok: true, observation };
   }
 
   async saveState(session: GameSession, name: string): Promise<{ ok: boolean; error?: string; message?: string; bytes?: number }> {

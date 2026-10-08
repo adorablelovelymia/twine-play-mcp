@@ -3,7 +3,7 @@
   "mcp": {
     "twine-play": {
       "type": "local",
-      "command": ["node", "/home/qiyue/Projects/twine-play-mcp/dist/index.js"],
+      "command": ["npx", "-y", "twine-play-mcp"],
       "enabled": true
     }
   }

@@ -1,17 +1,23 @@
 /**
  * M0 spike: validate the core runtime against a real SugarCube game.
- *   npm run spike
+ *   TWMCP_GAME=/path/to/game.html npm run spike
+ *
+ * Needs a game you have locally — without TWMCP_GAME this skips instead of crashing.
  */
 import { SessionManager } from '../src/session.js';
 import { renderObservation } from '../src/render.js';
+import { createChecker, requireGame } from './_harness.js';
 
-const GAME = process.env.TWMCP_GAME ?? '/home/qiyue/Projects/ts_ero_trap_dungeon-1.0.6/build/TS-Ero-Trap-Dungeon.html';
+const GAME = process.env.TWMCP_GAME ?? '';
 const STEPS = Number(process.env.TWMCP_STEPS ?? 25);
+if (!requireGame(GAME, 'spike')) process.exit(0);
 
+const suite = createChecker('spike checks');
 const results: Array<[string, boolean, string]> = [];
 const check = (name: string, ok: boolean, detail = '') => {
-  results.push([name, ok, detail]);
-  console.log(`${ok ? '  ✓' : '  ✗'} ${name}${detail ? ` — ${detail}` : ''}`);
+  const passed = suite.check(name, ok, detail);
+  results.push([name, passed, detail]);
+  return passed;
 };
 
 async function main() {
@@ -102,7 +108,6 @@ async function main() {
     process.exit(1);
   }
 }
-
 main().catch(async (err) => {
   console.error('\nSPIKE CRASHED:', err);
   process.exit(1);

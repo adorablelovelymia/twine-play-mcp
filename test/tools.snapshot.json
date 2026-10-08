@@ -1,0 +1,185 @@
+{
+  "toolCount": 15,
+  "totalBytes": 12216,
+  "tools": [
+    {
+      "name": "choose",
+      "params": [
+        "allow_external",
+        "choice",
+        "expected",
+        "format",
+        "game_id"
+      ],
+      "descBytes": 205,
+      "schemaBytes": 695
+    },
+    {
+      "name": "click_ui",
+      "params": [
+        "exact",
+        "format",
+        "game_id",
+        "ref",
+        "selector",
+        "text"
+      ],
+      "descBytes": 186,
+      "schemaBytes": 653
+    },
+    {
+      "name": "download_file",
+      "params": [
+        "action",
+        "dest_dir",
+        "dest_file",
+        "format",
+        "game_id",
+        "index",
+        "limit",
+        "name",
+        "timeout_ms",
+        "trigger"
+      ],
+      "descBytes": 191,
+      "schemaBytes": 1261
+    },
+    {
+      "name": "find_ui",
+      "params": [
+        "discover",
+        "exact",
+        "game_id",
+        "kind",
+        "limit",
+        "name",
+        "selector",
+        "text"
+      ],
+      "descBytes": 211,
+      "schemaBytes": 920
+    },
+    {
+      "name": "get_logs",
+      "params": [
+        "clear",
+        "game_id",
+        "kind",
+        "limit"
+      ],
+      "descBytes": 142,
+      "schemaBytes": 513
+    },
+    {
+      "name": "get_variables",
+      "params": [
+        "game_id",
+        "paths"
+      ],
+      "descBytes": 199,
+      "schemaBytes": 321
+    },
+    {
+      "name": "interact",
+      "params": [
+        "format",
+        "game_id",
+        "key",
+        "ref",
+        "value"
+      ],
+      "descBytes": 160,
+      "schemaBytes": 611
+    },
+    {
+      "name": "live_view",
+      "params": [
+        "game_id",
+        "open"
+      ],
+      "descBytes": 205,
+      "schemaBytes": 296
+    },
+    {
+      "name": "navigate",
+      "params": [
+        "action",
+        "format",
+        "game_id",
+        "seed",
+        "target"
+      ],
+      "descBytes": 160,
+      "schemaBytes": 562
+    },
+    {
+      "name": "observe",
+      "params": [
+        "for_text",
+        "format",
+        "game_id",
+        "include_variables",
+        "inputs_limit",
+        "inputs_offset",
+        "max_text_chars",
+        "since_last",
+        "wait_ms"
+      ],
+      "descBytes": 180,
+      "schemaBytes": 1146
+    },
+    {
+      "name": "open_game",
+      "params": [
+        "format",
+        "headless",
+        "seed",
+        "source",
+        "wait_timeout_ms"
+      ],
+      "descBytes": 183,
+      "schemaBytes": 649
+    },
+    {
+      "name": "screenshot",
+      "params": [
+        "game_id",
+        "path"
+      ],
+      "descBytes": 159,
+      "schemaBytes": 290
+    },
+    {
+      "name": "session",
+      "params": [
+        "action",
+        "game_id"
+      ],
+      "descBytes": 126,
+      "schemaBytes": 308
+    },
+    {
+      "name": "snapshot",
+      "params": [
+        "action",
+        "format",
+        "game_id",
+        "name"
+      ],
+      "descBytes": 177,
+      "schemaBytes": 503
+    },
+    {
+      "name": "upload_file",
+      "params": [
+        "file_input",
+        "file_path",
+        "format",
+        "game_id",
+        "trigger"
+      ],
+      "descBytes": 206,
+      "schemaBytes": 666
+    }
+  ]
+}

@@ -286,10 +286,25 @@ export async function liveViewUrl(mgr: SessionManager, session: GameSession): Pr
 export function forgetLiveView(id: string): void {
   frames.delete(id);
   capturing.delete(id);
+  reported.delete(id);
+  autoOpened.delete(id);
 }
 
 /** Sessions for which a browser tab was already auto-opened. */
 const autoOpened = new Set<string>();
+
+/**
+ * Sessions whose live-view URL was already handed out. The first call explains how the view
+ * works; later calls only repeat the URL, because the explanation is identical every time.
+ */
+const reported = new Set<string>();
+
+/** True the first time it is called for a session, false afterwards. */
+export function claimFirstReport(id: string): boolean {
+  if (reported.has(id)) return false;
+  reported.add(id);
+  return true;
+}
 
 /**
  * Guard so a careless agent cannot spawn a new browser tab on every live_view call:

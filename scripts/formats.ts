@@ -1,13 +1,17 @@
 /**
  * Multi-format adapter checks against compiled fixtures (Tweego).
- *   npm run formats
+ *   npm test
  *
  * Covers: format detection, text/choice extraction, navigation, variables,
  * backtracking and snapshot round trips per story-format adapter.
+ *
+ * This is the one self-check with no external dependencies — the fixtures live in
+ * test/fixtures/compiled/, so a fresh clone can run it (and CI can gate on it).
  */
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { SessionManager } from '../src/session.js';
+import { createChecker, varDiff } from './_harness.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const fixture = (name: string) => path.join(HERE, '..', 'test', 'fixtures', 'compiled', `${name}.html`);
@@ -33,25 +37,8 @@ const CASES: Case[] = [
 ];
 
 let failures = 0;
-const check = (prefix: string, name: string, ok: boolean, detail = '') => {
-  console.log(`  ${ok ? '✓' : '✗'} [${prefix}] ${name}${detail ? ` — ${detail}` : ''}`);
-  if (!ok) failures++;
-};
-
-const varDiff = (a: unknown, b: unknown): string[] => {
-  const diff: string[] = [];
-  const walk = (x: unknown, y: unknown, p: string) => {
-    if (JSON.stringify(x) === JSON.stringify(y)) return;
-    if (typeof x !== 'object' || typeof y !== 'object' || x === null || y === null) {
-      diff.push(`${p}: ${JSON.stringify(x)} -> ${JSON.stringify(y)}`);
-      return;
-    }
-    const keys = new Set([...Object.keys(x as object), ...Object.keys(y as object)]);
-    for (const k of keys) walk((x as Record<string, unknown>)[k], (y as Record<string, unknown>)[k], `${p}.${k}`);
-  };
-  walk(a, b, '$');
-  return diff;
-};
+const suite = createChecker('format checks');
+const check = suite.checkp;
 
 const manager = new SessionManager();
 
@@ -106,6 +93,41 @@ for (const c of CASES) {
   }
 }
 
-console.log(`\n===== format checks: ${failures === 0 ? 'all passed' : failures + ' FAILED'} =====`);
+// ---------------------------------------------------------------------------
+// Agent-facing regressions: state hygiene and clean degradation.
+// These used to be silent bugs, so they are pinned here on the fixtures.
+// ---------------------------------------------------------------------------
+console.log('\n=== agent-facing regressions (sugarcube fixture) ===');
+try {
+  const session = await manager.open({ source: fixture('sugarcube'), headless: true, waitTimeoutMs: 15000 });
+  const id = session.id;
+
+  // The next observation must be complete even when the caller hides variables: hiding them is a
+  // rendering choice, not a mutation of the session state.
+  const lean = await manager.observe(session, { includeVariables: false });
+  check('regress', 'includeVariables:false returns no variables in that observation', lean.variables === null, JSON.stringify(lean.variables));
+  const full = await manager.observe(session, { includeVariables: true });
+  check('regress', 'a later includeVariables:true still sees the story variables', full.variables !== null, JSON.stringify(full.variables).slice(0, 120));
+
+  // session.step is the public step counter, and journal entries must stay consistent with it.
+  const before = session.journal.length;
+  await manager.choose(session, 'Open the door');
+  check('regress', 'choose appends exactly one journal entry', session.journal.length === before + 1, `${before} -> ${session.journal.length}`);
+
+  // Unknown game ids must list what is open instead of a bare "unknown".
+  let unknownMsg = '';
+  try {
+    manager.get('game_nope');
+  } catch (err) {
+    unknownMsg = String((err as Error)?.message ?? err);
+  }
+  check('regress', 'unknown game_id lists the open sessions', unknownMsg.includes(id), unknownMsg);
+
+  await manager.close(id);
+} catch (err) {
+  check('regress', 'regression session', false, String((err as Error)?.message ?? err));
+}
+
+failures = suite.report();
 await manager.closeAll();
 process.exit(failures ? 1 : 0);

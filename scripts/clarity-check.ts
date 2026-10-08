@@ -7,18 +7,23 @@
  *   - get_variables reads story variables by dot path
  *   - failures stay clean (no full-observation dump)
  *
- *   npm run clarity
+ *   TWMCP_GAME=/path/to/game.html npm run clarity
+ *
+ * Needs a game you have locally — without TWMCP_GAME this skips instead of crashing.
  */
 import { SessionManager, type GameSession } from '../src/session.js';
 import { renderObservation } from '../src/render.js';
+import { createChecker, requireGame } from './_harness.js';
 
-const GAME =
-  process.env.TWMCP_GAME ?? '/home/qiyue/Projects/degrees_of_lewdity/DoL-Transmod/DoL-Transmod 0.5.12.13.html';
+const GAME = process.env.TWMCP_GAME ?? '';
+if (!requireGame(GAME, 'clarity-check')) process.exit(0);
 
+const suite = createChecker('clarity checks');
 const results: Array<[string, boolean, string]> = [];
 const check = (name: string, ok: boolean, detail = '') => {
-  results.push([name, ok, detail]);
-  console.log(`${ok ? '  ✓' : '  ✗'} ${name}${detail ? ` — ${detail}` : ''}`);
+  const passed = suite.check(name, ok, detail);
+  results.push([name, passed, detail]);
+  return passed;
 };
 
 async function main() {

@@ -2,8 +2,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { SessionManager, type ChoiceInfo, type DialogInfo, type GameSession, type Observation } from './session.js';
-import { renderConsole, renderObservation, renderOpen } from './render.js';
-import { claimAutoOpen, forgetLiveView, liveViewUrl, openInBrowser } from './live-view.js';
+import { renderConsole, renderObservation, renderOpen, renderSnapshotList } from './render.js';
+import { claimAutoOpen, claimFirstReport, forgetLiveView, liveViewUrl, openInBrowser } from './live-view.js';
 
 type TextResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 
@@ -33,11 +33,20 @@ const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
 const errorText = (error: string, message?: string): TextResult =>
   text(`ERROR: ${error}${message ? ` — ${message}` : ''}`, true);
 
-/** Compact error: no full observation dump, just the message + an optional hint + what can be chosen right now. */
+/**
+ * Compact error: the message, an optional hint, what the agent can act on right now, and — when
+ * the failure was a bad/ambiguous session — the sessions that do exist. Never a full observation.
+ */
 function errResult(
   code: string,
   message?: string,
-  extra?: { hint?: string; choices?: ChoiceInfo[]; dialog?: DialogInfo | null; passage?: string | null }
+  extra?: {
+    hint?: string;
+    choices?: ChoiceInfo[];
+    dialog?: DialogInfo | null;
+    passage?: string | null;
+    games?: Array<{ id: string; title: string }>;
+  }
 ): TextResult {
   const lines = [`ERROR: ${code}${message ? ` — ${message}` : ''}`];
   if (extra?.hint) lines.push(`Hint: ${extra.hint}`);
@@ -52,6 +61,9 @@ function errResult(
   if (extra?.dialog?.buttons?.length) {
     lines.push('Dialog buttons: ' + extra.dialog.buttons.map((b) => `${b.n}) ${oneLine(b.label)}`).join('  '));
   }
+  if (extra?.games?.length) {
+    lines.push('Open games: ' + extra.games.map((g) => `${g.id} (${g.title})`).join('  '));
+  }
   return text(lines.join('\n').slice(0, 2500), true);
 }
 
@@ -59,6 +71,7 @@ function errResult(
 function jsonPayload(session: GameSession, obs: Observation, action?: Record<string, unknown>): string {
   return JSON.stringify({
     ok: true,
+    game_id: session.id,
     passage: obs.passage,
     format: obs.format,
     step: session.step,
@@ -101,13 +114,21 @@ function observationResult(
   return text((opts.prefix ? opts.prefix + '\n\n' : '') + body);
 }
 
-const formatParam = z
-  .enum(['text', 'json'])
-  .optional()
-  .describe('Output format: "text" (default, human-readable) or "json" (JSON string for programmatic use).');
+const formatParam = z.enum(['text', 'json']).optional().describe('"text" (default) or "json".');
 
+/**
+ * `game_id` is optional everywhere: with one open game it carries no information. It is only
+ * needed when several games are open at once, and then the error names the candidates.
+ */
+const gameIdParam = z.string().optional().describe('Session id from open_game. Omit when a single game is open.');
 
-const gameId = z.string().describe('Session id returned by open_game.');
+/** Turn any thrown error into a tool result, listing the open games when the id was the problem. */
+function fromError(manager: SessionManager, code: string, err: unknown): TextResult {
+  const message = String((err as Error)?.message ?? err);
+  const games = manager.listSessions().map((s) => ({ id: s.id, title: s.title }));
+  const sessionish = /game_id|Unknown game_id|open games/i.test(message);
+  return errResult(code, message, sessionish ? { games, hint: 'Call open_game, or pass game_id explicitly.' } : undefined);
+}
 
 function consoleErrors(session: GameSession): number {
   return session.console.filter((c) => c.type !== 'warning').length;
@@ -132,7 +153,8 @@ export function buildServer(manager: SessionManager): McpServer {
         '• Default: call live_view(game_id) and give the user the returned URL; pass open:true only if they asked you to open it for them. Auto-open happens at most once per game.\n' +
         '• Only if the user explicitly asks for a real browser window: open_game with headless:false. Do not also open a live view for the same game.\n' +
         '• screenshot is a one-shot visual check, never a stream — do not loop it to "show" the user the game.\n' +
-        '• If a view is already open, reuse it (live_view returns the same URL without launching anything new).'
+        '• If a view is already open, reuse it (live_view returns the same URL without launching anything new).\n' +
+        'GAME ID: game_id is optional while exactly one game is open — omit it for less noise.'
     }
   );
 
@@ -141,45 +163,29 @@ export function buildServer(manager: SessionManager): McpServer {
     {
       title: 'Open a Twine game',
       description:
-        'Open a Twine / interactive-fiction HTML game and return the first observation (passage text, numbered choices, inputs, dialog). ' +
-        'Accepts a local .html file, a game folder (index.html or a single html is picked), or an http(s) URL. ' +
-        'Local games are served over 127.0.0.1 so saves work. ' +
-        'Returns a formatted text observation (string); pass format:"json" for a JSON string. ' +
-        'Inputs are listed in windows of 40 (see inputs_offset/inputs_limit on observe) and find_ui(text) locates any control by label.',
+        'Open a Twine / interactive-fiction game and return the first observation. Accepts a local .html file, a folder, or an http(s) URL. Local games are served over 127.0.0.1 so saves work.',
       inputSchema: {
-        source: z.string().describe('Path to an .html file or folder, or an http(s) URL.'),
-        headless: z
-          .boolean()
-          .optional()
-          .describe(
-            'Run browser headless (default true). Set false ONLY when the user explicitly asks to watch a real browser window — and then do not also open a live_view for the same game.'
-          ),
-        seed: z.string().optional().describe('Seed SugarCube PRNG (State.prng) for reproducible runs; game must use SugarCube randomness to be deterministic.'),
-        include_variables: z.boolean().optional().describe('Embed the (truncated) story variables in the observation (default false; prefer get_variables for specific keys).'),
-        format: formatParam,
-        block_trackers: z.boolean().optional().describe('Block analytics/tracker requests for a quiet session (default true).'),
-        wait_timeout_ms: z.number().int().min(1000).max(120000).optional().describe('How long to wait for the game to settle after load (default 20000).')
+        source: z.string().describe('Path to a .html file or folder, or an http(s) URL.'),
+        headless: z.boolean().optional().describe('Run headless (default true). Set false only to show a real browser window.'),
+        seed: z.string().optional().describe('Seed the SugarCube PRNG for reproducible runs.'),
+        wait_timeout_ms: z.number().int().min(1000).max(120000).optional().describe('How long to wait for the game to settle (default 20000).'),
+        format: formatParam
       }
     },
-    async ({ source, headless, seed, include_variables, format, wait_timeout_ms, block_trackers }) => {
+    async ({ source, headless, seed, wait_timeout_ms, format }) => {
       try {
         const session = await manager.open({
           source,
           headless: headless ?? true,
           seed,
           waitTimeoutMs: wait_timeout_ms,
-          blockTrackers: block_trackers ?? true
+          blockTrackers: process.env.TWMCP_BLOCK_TRACKERS !== '0'
         });
         const obs = session.lastObservation;
         if (!obs) return errorText('no-observation', 'Game loaded but produced no observation.');
-        if (include_variables !== true) {
-          session.lastObservation = { ...obs, variables: null };
-        }
-        const finalObs = session.lastObservation ?? obs;
-        if (format === 'json') return observationResult(session, finalObs, { format });
+        if (format === 'json') return observationResult(session, obs, { format });
         return text(
-          renderOpen(session, finalObs) +
-            '\n\nTip: choose(game_id, 1) clicks the first choice; every action returns a fresh observation.'
+          renderOpen(session, obs) + '\n\nTip: choose(1) clicks the first choice; every action returns a fresh observation.'
         );
       } catch (err) {
         return errorText('open-failed', String((err as Error)?.message ?? err));
@@ -190,37 +196,44 @@ export function buildServer(manager: SessionManager): McpServer {
   server.registerTool(
     'observe',
     {
-      title: 'Observe current game state',
+      title: 'Observe the game (optionally waiting)',
       description:
-        'Read the current passage: text, numbered choices, input fields, dialog state and status text. ' +
-        'Returns a formatted text observation (string); pass format:"json" for a JSON string. ' +
-        'Inputs are paginated in windows of 40: when truncated, the header says e.g. "Inputs (41-80 of 132)" — call again with inputs_offset=80. ' +
-        'Use find_ui(text) to jump to a specific control, get_variables for specific story variables, and since_last=true when polling to save tokens.',
+        'Read the current passage: text, choices, inputs, dialog, status. Pass for_text or wait_ms to wait first — timed passages need no second call. Inputs are paginated in windows of 40.',
       inputSchema: {
-        game_id: gameId,
-        since_last: z.boolean().optional().describe('If true and nothing changed, return only a short "no change" note (default true; ignored in json format).'),
-        include_variables: z.boolean().optional().describe('Embed the (truncated) story variables (default false; prefer get_variables for specific keys).'),
-        include_status: z.boolean().optional().describe('Include status/caption text (default true).'),
+        game_id: gameIdParam,
+        since_last: z.boolean().optional().describe('Return just a "no change" note when nothing changed (default true; ignored for json).'),
+        for_text: z.string().optional().describe('Wait until this text appears anywhere on the page, then observe.'),
+        wait_ms: z.number().int().min(0).max(120000).optional().describe('Wait this long before observing (also the timeout for for_text, default 15000).'),
+        include_variables: z.boolean().optional().describe('Embed story variables (default false).'),
         max_text_chars: z.number().int().min(200).max(100000).optional().describe('Cap passage text length (default 12000).'),
         inputs_offset: z.number().int().min(0).max(1000).optional().describe('Skip this many inputs before listing (default 0).'),
         inputs_limit: z.number().int().min(1).max(500).optional().describe('How many inputs to list (default 40).'),
         format: formatParam
       }
     },
-    async ({ game_id, since_last, include_variables, include_status, max_text_chars, inputs_offset, inputs_limit, format }) => {
+    async ({ game_id, since_last, for_text, wait_ms, include_variables, max_text_chars, inputs_offset, inputs_limit, format }) => {
       try {
-        const session = manager.get(game_id);
+        const session = manager.resolve(game_id);
         const previous = session.lastObservation;
+        if (for_text !== undefined || wait_ms !== undefined) {
+          const res = await manager.wait(session, { ms: wait_ms, forText: for_text, timeoutMs: wait_ms });
+          const note = for_text
+            ? res.matched
+              ? `Text found after ${res.waitedMs}ms.`
+              : `Text NOT found within ${res.waitedMs}ms.`
+            : `Waited ${res.waitedMs}ms.`;
+          return observationResult(session, res.observation ?? (await manager.observe(session)), { format, prefix: note });
+        }
         const obs = await manager.observe(session, {
           includeVariables: include_variables ?? false,
-          includeStatus: include_status ?? true,
+          includeStatus: true,
           maxTextChars: max_text_chars ?? 12000,
           inputsOffset: inputs_offset ?? 0,
           inputsLimit: inputs_limit ?? 40
         });
         return observationResult(session, obs, { format, sinceLast: since_last ?? true, previous });
       } catch (err) {
-        return errorText('observe-failed', String((err as Error)?.message ?? err));
+        return fromError(manager, 'observe-failed', err);
       }
     }
   );
@@ -230,26 +243,23 @@ export function buildServer(manager: SessionManager): McpServer {
     {
       title: 'Click a choice',
       description:
-        'Click a passage choice by its 1-based number from the last observation, or by (partial) label text. ' +
-        'Numbered choices include dialog buttons (tagged [dialog] in observations) — so choose() answers dialogs too. ' +
-        'Waits for the game to settle and returns the new observation. Pass expected to guard against clicking the wrong link.',
+        'Click a passage choice by 1-based number from the last observation, or by (partial) label. Numbered choices include dialog buttons (tagged [dialog]). Pass expected to guard against clicking the wrong link.',
       inputSchema: {
-        game_id: gameId,
-        choice: z.union([z.number(), z.string()]).describe('1-based choice number from the last observation, or label text (case-insensitive, may be partial if unambiguous).'),
-        expected: z.string().optional().describe('Substring the clicked choice label must contain; fails safely if it does not match.'),
-        allow_external: z.boolean().optional().describe('Allow following links that leave the game (default false, they are blocked).'),
+        game_id: gameIdParam,
+        choice: z.union([z.number(), z.string()]).describe('1-based number from the last observation, or label text (case-insensitive, may be partial).'),
+        expected: z.string().optional().describe('Substring the clicked label must contain; fails safely if it does not match.'),
+        allow_external: z.boolean().optional().describe('Allow links that leave the game (default false, they are blocked).'),
         format: formatParam
       }
     },
     async ({ game_id, choice, expected, allow_external, format }) => {
       try {
-        const session = manager.get(game_id);
+        const session = manager.resolve(game_id);
         const res = await manager.choose(session, choice, expected, allow_external ?? false);
         if (!res.ok) {
           const last = session.lastObservation;
           const hints: Record<string, string> = {
-            'no-such-choice':
-              'Use a number from the last observation, or observe() to refresh labels. Dialog buttons are listed in the choices with [dialog].',
+            'no-such-choice': 'Use a number from the last observation, or observe() to refresh labels. Dialog buttons are listed with [dialog].',
             'bad-index': 'Number must be within 1..N of the last observation.',
             'stale-ref': 'The passage changed; call observe() and retry.',
             'ambiguous-choice': 'Use the 1-based number instead of a short label.',
@@ -269,32 +279,45 @@ export function buildServer(manager: SessionManager): McpServer {
           action: { label: res.clicked?.label ?? null, target: res.clicked?.target ?? null, kind: res.clicked?.kind ?? null }
         });
       } catch (err) {
-        return errorText('choose-failed', String((err as Error)?.message ?? err));
+        return fromError(manager, 'choose-failed', err);
       }
     }
   );
 
   server.registerTool(
-    'wait',
+    'click_ui',
     {
-      title: 'Wait for the game',
-      description: 'Wait for time (ms), for a text to appear, and/or for the page to settle, then return the new observation. Useful for timed passages and animations. Returns text; pass format:"json" for a JSON string.',
+      title: 'Click UI outside the passage',
+      description:
+        'Click sidebar buttons and menus by ref, CSS selector or visible text. Text matching covers <label> controls (SugarCube radio/checkbox options). Use choose() for numbered passage choices.',
       inputSchema: {
-        game_id: gameId,
-        ms: z.number().int().min(0).max(60000).optional().describe('Milliseconds to wait.'),
-        for_text: z.string().optional().describe('Wait until this text appears anywhere on the page (up to timeout_ms).'),
-        timeout_ms: z.number().int().min(1000).max(120000).optional().describe('Timeout for for_text (default 15000).'),
+        game_id: gameIdParam,
+        ref: z.string().optional().describe('UI ref from an observation (e.g. "u1" or "x3").'),
+        text: z.string().optional().describe('Visible text of the target (case-insensitive, partial).'),
+        selector: z.string().optional().describe('CSS selector, if you know the exact element.'),
+        exact: z.boolean().optional().describe('Require an exact text match (default false).'),
         format: formatParam
       }
     },
-    async ({ game_id, ms, for_text, timeout_ms, format }) => {
+    async ({ game_id, ref, text: uiText, selector, exact, format }) => {
       try {
-        const session = manager.get(game_id);
-        const res = await manager.wait(session, { ms, forText: for_text, timeoutMs: timeout_ms });
-        const note = for_text ? (res.matched ? `Text found after ${res.waitedMs}ms.` : `Text NOT found within ${res.waitedMs}ms.`) : `Waited ${res.waitedMs}ms.`;
-        return observationResult(session, res.observation!, { format, prefix: note });
+        const session = manager.resolve(game_id);
+        if (!ref && !uiText && !selector) return errorText('missing-argument', 'Provide ref, text or selector.');
+        const res = await manager.clickUi(session, { ref, text: uiText, selector, exact });
+        if (!res.ok) {
+          return errResult(res.error ?? 'no-match', res.message, {
+            hint:
+              res.error === 'stale-ref'
+                ? 'Refs are refreshed by observe(); call observe() again or use find_ui(text).'
+                : 'Locate the control with find_ui(text) or pass a CSS selector.',
+            choices: session.lastObservation?.choices,
+            passage: session.lastObservation?.passage ?? null
+          });
+        }
+        const note = `Clicked UI: ${res.label ?? '(element)'}${res.matches && res.matches > 1 ? ` (${res.matches} matches; alternatives: ${(res.alternatives ?? []).slice(0, 4).join(' | ')})` : ''}`;
+        return observationResult(session, res.observation!, { format, prefix: note, action: { label: res.label ?? null } });
       } catch (err) {
-        return errorText('wait-failed', String((err as Error)?.message ?? err));
+        return fromError(manager, 'click-ui-failed', err);
       }
     }
   );
@@ -304,20 +327,18 @@ export function buildServer(manager: SessionManager): McpServer {
     {
       title: 'Fill an input or press a key',
       description:
-        'Interact with input fields or the keyboard: set a value on an input/textarea/select by ref, or press a key (e.g. "Enter", "ArrowUp"). ' +
-        'For radios/checkboxes pass value "true" or "false". Inputs are refs from the last observation (or find_ui). ' +
-        'Returns the new observation; pass format:"json" for a JSON string.',
+        'Set an input/textarea/select by ref, or press a key ("Enter", "ArrowUp"). Radios/checkboxes take "true"/"false". Refs come from the last observation or find_ui.',
       inputSchema: {
-        game_id: gameId,
+        game_id: gameIdParam,
         ref: z.string().optional().describe('Input ref from the last observation (e.g. "i1"). Optional when only pressing a key.'),
-        value: z.string().optional().describe('Value to set on the input/select. Radios/checkboxes: "true" or "false".'),
+        value: z.string().optional().describe('Value to set. Radios/checkboxes: "true" or "false".'),
         key: z.string().optional().describe('Keyboard key to press, e.g. "Enter", "a", "ArrowDown".'),
         format: formatParam
       }
     },
     async ({ game_id, ref, value, key, format }) => {
       try {
-        const session = manager.get(game_id);
+        const session = manager.resolve(game_id);
         if (!ref && !key) return errorText('missing-argument', 'Provide ref (with value) and/or key.');
         if (key) {
           const res = await manager.press(session, key, ref);
@@ -335,135 +356,100 @@ export function buildServer(manager: SessionManager): McpServer {
         }
         return observationResult(session, res.observation!, { format, prefix: `Set ${ref} = "${value ?? ''}".` });
       } catch (err) {
-        return errorText('interact-failed', String((err as Error)?.message ?? err));
+        return fromError(manager, 'interact-failed', err);
       }
     }
   );
 
   server.registerTool(
-    'back',
+    'navigate',
     {
-      title: 'Go back one step',
-      description: 'Undo the last passage navigation when the story format supports it (SugarCube: Engine.backward). Returns the new observation (text; format:"json" for JSON).',
-      inputSchema: { game_id: gameId, format: formatParam }
-    },
-    async ({ game_id, format }) => {
-      try {
-        const session = manager.get(game_id);
-        const res = await manager.back(session);
-        if (!res.ok) return errorText(res.error ?? 'back-failed', res.message);
-        return observationResult(session, res.observation!, { format, prefix: 'Went back one step.' });
-      } catch (err) {
-        return errorText('back-failed', String((err as Error)?.message ?? err));
-      }
-    }
-  );
-
-  server.registerTool(
-    'restart',
-    {
-      title: 'Restart the game',
-      description: 'Restart the story from the beginning (optionally with a new PRNG seed). Returns the first observation (text; format:"json" for JSON).',
-      inputSchema: {
-        game_id: gameId,
-        seed: z.string().optional().describe('New SugarCube PRNG seed.'),
-        format: formatParam
-      }
-    },
-    async ({ game_id, seed, format }) => {
-      try {
-        const session = manager.get(game_id);
-        const res = await manager.restart(session, seed);
-        return observationResult(session, res.observation!, { format, prefix: `Restarted${res.seeded ? ` with seed "${seed}"` : ''}.` });
-      } catch (err) {
-        return errorText('restart-failed', String((err as Error)?.message ?? err));
-      }
-    }
-  );
-
-  server.registerTool(
-    'save_state',
-    {
-      title: 'Save an in-session snapshot',
+      title: 'Move through the story (back / restart / goto)',
       description:
-        'Save the full game state under a name so you can branch: save -> try a path -> load_state -> try another path. ' +
-        'Supported natively by SugarCube; other formats report unsupported.',
+        'back: undo one passage (SugarCube/Harlowe). restart: start over, optionally reseeded. goto: jump straight to a named passage — QA only, it skips the path there.',
       inputSchema: {
-        game_id: gameId,
-        name: z.string().optional().describe('Snapshot name (default "default").')
-      }
-    },
-    async ({ game_id, name }) => {
-      try {
-        const session = manager.get(game_id);
-        const res = await manager.saveState(session, name ?? 'default');
-        if (!res.ok) return errorText(res.error ?? 'save-failed', res.message);
-        return text(`Saved snapshot "${name ?? 'default'}" (${res.bytes} chars). Snapshots in this session: ${[...session.snapshots.keys()].join(', ')}.`);
-      } catch (err) {
-        return errorText('save-failed', String((err as Error)?.message ?? err));
-      }
-    }
-  );
-
-  server.registerTool(
-    'load_state',
-    {
-      title: 'Load an in-session snapshot',
-      description: 'Restore a snapshot created by save_state and return the resulting observation (text; format:"json" for JSON).',
-      inputSchema: {
-        game_id: gameId,
-        name: z.string().optional().describe('Snapshot name (default "default").'),
+        game_id: gameIdParam,
+        action: z.enum(['back', 'restart', 'goto']).describe('What to do.'),
+        target: z.string().optional().describe('Passage name for action:"goto".'),
+        seed: z.string().optional().describe('New SugarCube PRNG seed for action:"restart".'),
         format: formatParam
       }
     },
-    async ({ game_id, name, format }) => {
+    async ({ game_id, action, target, seed, format }) => {
       try {
-        const session = manager.get(game_id);
-        const res = await manager.loadState(session, name ?? 'default');
-        if (!res.ok) return errorText(res.error ?? 'load-failed', res.message);
-        return observationResult(session, res.observation!, { format, prefix: `Loaded snapshot "${name ?? 'default'}".` });
-      } catch (err) {
-        return errorText('load-failed', String((err as Error)?.message ?? err));
-      }
-    }
-  );
-
-  server.registerTool(
-    'click_ui',
-    {
-      title: 'Click UI outside the passage',
-      description:
-        'Click dialogs, sidebar buttons and menus (SAVES, OPTIONS, ModLoader banner, modal buttons) by ref, CSS selector or visible text. ' +
-        'Text matching covers <label>-based controls too (SugarCube radio/checkbox options like "Jet black" or "Punch"); shortest match wins, exact=true for exact text. ' +
-        'Returns the new observation (text; format:"json" for JSON). Use choose() for numbered passage choices and dialog buttons.',
-      inputSchema: {
-        game_id: gameId,
-        ref: z.string().optional().describe('UI ref from an observation (e.g. "u1" or "x3").'),
-        text: z.string().optional().describe('Visible text of the target (case-insensitive, partial match; the shortest match wins).'),
-        selector: z.string().optional().describe('CSS selector, if you know the exact element.'),
-        exact: z.boolean().optional().describe('Require an exact text match (default false).'),
-        format: formatParam
-      }
-    },
-    async ({ game_id, ref, text: uiText, selector, exact, format }) => {
-      try {
-        const session = manager.get(game_id);
-        if (!ref && !uiText && !selector) return errorText('missing-argument', 'Provide ref, text or selector.');
-        const res = await manager.clickUi(session, { ref, text: uiText, selector, exact });
+        const session = manager.resolve(game_id);
+        if (action === 'back') {
+          const res = await manager.back(session);
+          if (!res.ok) {
+            return errResult(res.error ?? 'back-failed', res.message, {
+              hint: 'Only SugarCube (Engine.backward) and Harlowe (sidebar undo) can go back. Save a snapshot before risky branches instead.',
+              passage: session.lastObservation?.passage ?? null
+            });
+          }
+          return observationResult(session, res.observation!, { format, prefix: 'Went back one step.' });
+        }
+        if (action === 'restart') {
+          const res = await manager.restart(session, seed);
+          return observationResult(session, res.observation!, {
+            format,
+            prefix: `Restarted${res.seeded ? ` with seed "${seed}"` : ''}.`
+          });
+        }
+        if (!target) return errorText('missing-argument', 'action:"goto" needs target (a passage name).');
+        const res = await manager.goTo(session, target);
         if (!res.ok) {
-          return errResult(res.error ?? 'no-match', res.message, {
-            hint:
-              res.error === 'stale-ref'
-                ? 'Refs are refreshed by observe(); call observe() again or use find_ui(text).'
-                : 'Locate the control with find_ui(text) or pass a CSS selector. Numbered passage choices/dialog buttons use choose().',
-            choices: session.lastObservation?.choices,
+          return errResult(res.error ?? 'goto-failed', res.message, {
+            hint: 'goto needs a story format with a jump API (SugarCube Engine.play, Snowman story.show, Harlowe Engine.goTo).',
             passage: session.lastObservation?.passage ?? null
           });
         }
-        const note = `Clicked UI: ${res.label ?? '(element)'}${res.matches && res.matches > 1 ? ` (${res.matches} matches; alternatives: ${(res.alternatives ?? []).slice(0, 4).join(' | ')})` : ''}`;
-        return observationResult(session, res.observation!, { format, prefix: note, action: { label: res.label ?? null } });
+        return observationResult(session, res.observation!, { format, prefix: `Jumped to "${target}".` });
       } catch (err) {
-        return errorText('click-ui-failed', String((err as Error)?.message ?? err));
+        return fromError(manager, 'navigate-failed', err);
+      }
+    }
+  );
+
+  server.registerTool(
+    'snapshot',
+    {
+      title: 'In-session snapshots (save / load / list)',
+      description:
+        'Branch exploration: save stores the current state under a name, load restores it, list shows what exists. Native on SugarCube, Chapbook and Snowman; Harlowe reports unsupported.',
+      inputSchema: {
+        game_id: gameIdParam,
+        action: z.enum(['save', 'load', 'list']).describe('save, load or list.'),
+        name: z.string().optional().describe('Snapshot name (default "default"; required for save/load).'),
+        format: formatParam
+      }
+    },
+    async ({ game_id, action, name, format }) => {
+      try {
+        const session = manager.resolve(game_id);
+        const key = name ?? 'default';
+        if (action === 'list') {
+          return text(renderSnapshotList(session.id, manager.listSnapshots(session)));
+        }
+        if (action === 'save') {
+          const res = await manager.saveState(session, key);
+          if (!res.ok) {
+            return errResult(res.error ?? 'save-failed', res.message, {
+              hint: 'No snapshot API for this story format — use a before/after variable diff via get_variables instead.'
+            });
+          }
+          const names = manager.listSnapshots(session).map((s) => s.name);
+          return text(`Saved snapshot "${key}" (${res.bytes} chars). Snapshots: ${names.join(', ')}.`);
+        }
+        const res = await manager.loadState(session, key);
+        if (!res.ok) {
+          return errResult(res.error ?? 'load-failed', res.message, {
+            hint: 'Call snapshot(action:"list") to see the names that exist.',
+            passage: session.lastObservation?.passage ?? null
+          });
+        }
+        return observationResult(session, res.observation!, { format, prefix: `Loaded snapshot "${key}".` });
+      } catch (err) {
+        return fromError(manager, 'snapshot-failed', err);
       }
     }
   );
@@ -471,31 +457,66 @@ export function buildServer(manager: SessionManager): McpServer {
   server.registerTool(
     'find_ui',
     {
-      title: 'Find a control by text',
+      title: 'Find a control, input or panel',
       description:
-        'Search visible controls (buttons, links, labels, inputs) by label text and/or input name; returns refs usable with click_ui(ref), interact(ref, value) and upload_file(ref). ' +
-        'This is the fastest way to reach radio/checkbox options (e.g. "Jet black", "Punch") and any input beyond the 40-item observation window. ' +
-        'Results are capped by limit; no game state changes.',
+        'Find visible controls (buttons, links, labels, inputs) by text and/or input name; returns refs for click_ui/interact. Pass selector to inspect one DOM subtree, or discover:true to list overlay panels (mod GUIs).',
       inputSchema: {
-        game_id: gameId,
+        game_id: gameIdParam,
         text: z.string().optional().describe('Label text to search for (case-insensitive, partial by default).'),
         exact: z.boolean().optional().describe('Require an exact label match (default false).'),
         kind: z.string().optional().describe('Filter by kind: button, link, label, input, radio, checkbox, select, textarea.'),
         name: z.string().optional().describe('Filter by input name attribute (exact).'),
+        selector: z.string().optional().describe('Inspect this DOM subtree instead of searching by text.'),
+        discover: z.boolean().optional().describe('Without text/name/selector: list overlay panels that contain buttons or file inputs.'),
         limit: z.number().int().min(1).max(100).optional().describe('Max matches to return (default 20).')
       }
     },
-    async ({ game_id, text: q, exact, kind, name, limit }) => {
+    async ({ game_id, text: q, exact, kind, name, selector, discover, limit }) => {
       try {
-        const session = manager.get(game_id);
-        if (!q && !name) return errorText('missing-argument', 'Provide text and/or name to search for.');
+        const session = manager.resolve(game_id);
+        // Panel inspection / discovery shares this tool: one "find things in the UI" entry point.
+        if (selector || (discover && !q && !name)) {
+          const res = await manager.inspectUi(session, selector);
+          if (!res.ok) return fromError(manager, 'inspect-failed', res.error ?? res.message);
+          if (!selector) {
+            const cands = (res.candidates ?? []) as Array<Record<string, unknown>>;
+            if (!cands.length) return text('No overlay panels discovered. Pass selector to inspect a specific element.');
+            return text(
+              'Panels:\n' +
+                cands
+                  .map(
+                    (c, i) =>
+                      `${i + 1}. ${c.frame ? '[iframe] ' : ''}${c.selector} — ${c.buttons} buttons, ${c.inputs} inputs, ${c.fileInputs} file inputs: ${String(c.text ?? '').slice(0, 90)}`
+                  )
+                  .join('\n') +
+                '\n\nTip: upload_file without file_input searches all frames; click_ui by text also works inside iframes.'
+            );
+          }
+          const lines = [`# ${res.selector}${res.frame ? ' (iframe)' : ''}`, res.text ?? ''];
+          if (res.buttons?.length) {
+            lines.push('', 'Buttons:');
+            res.buttons.forEach((b, i) => lines.push(`  ${i + 1}. ${b.label}${b.ref ? ` [${b.ref}]` : ' (use click_ui text)'}`));
+          }
+          if (res.inputs?.length) {
+            lines.push('', 'Inputs:');
+            for (const inp of res.inputs) {
+              lines.push(
+                `  ${inp.ref || '(file input — use upload_file)'} ${inp.kind}${inp.label ? ` "${inp.label.slice(0, 40)}"` : ''}${inp.name ? ` name="${inp.name}"` : ''}${inp.value ? ` value="${String(inp.value).slice(0, 40)}"` : ''}` +
+                  (inp.checked !== undefined ? ` checked=${inp.checked}` : '')
+              );
+            }
+          }
+          return text(lines.join('\n'));
+        }
+
+        if (!q && !name) return errorText('missing-argument', 'Provide text and/or name; or selector / discover:true for panels.');
         const res = await manager.findUi(session, { text: q, exact, kind, name, limit });
-        if (!res.ok) return errorText(res.error ?? 'find-failed', res.message);
+        if (!res.ok) return fromError(manager, 'find-failed', res.error ?? res.message);
         const matches = res.matches ?? [];
         if (!matches.length) {
           return text(
             `No visible control matches${q ? ` "${q}"` : ''}${name ? ` name="${name}"` : ''}. ` +
-              'Try observe() for numbered inputs/choices, or inspect_ui(selector) for panels.'
+              'Try observe() for numbered inputs/choices, or find_ui(discover:true) for panels.'
           );
         }
         const lines = [
@@ -512,7 +533,7 @@ export function buildServer(manager: SessionManager): McpServer {
         }
         return text(lines.join('\n'));
       } catch (err) {
-        return errorText('find-failed', String((err as Error)?.message ?? err));
+        return fromError(manager, 'find-failed', err);
       }
     }
   );
@@ -522,21 +543,71 @@ export function buildServer(manager: SessionManager): McpServer {
     {
       title: 'Read story variables',
       description:
-        'Read specific story variables (SugarCube State.variables) by dot path, e.g. ["haircolour", "background", "player.background"]. ' +
-        'Accepts "V.x", "variables.x" or plain "x". With no paths, returns a shallow summary of the top-level keys. Output is JSON.',
+        'Read SugarCube State.variables by dot path, e.g. ["haircolour", "player.background"]; "V.x" and "variables.x" also work. No paths: shallow top-level key summary. Other formats have no readable store.',
       inputSchema: {
-        game_id: gameId,
+        game_id: gameIdParam,
         paths: z.array(z.string()).max(50).optional().describe('Dot paths to read (default: top-level key summary).')
       }
     },
     async ({ game_id, paths }) => {
       try {
-        const session = manager.get(game_id);
+        const session = manager.resolve(game_id);
         const res = await manager.getVariables(session, paths);
-        if (!res.ok) return errorText(res.error ?? 'variables-failed', res.message);
+        if (!res.ok) {
+          return errResult(res.error ?? 'variables-failed', res.message, {
+            hint: 'get_variables needs SugarCube. For Snowman/Chapbook use observe(include_variables:true) or a snapshot.'
+          });
+        }
         return text(JSON.stringify(res));
       } catch (err) {
-        return errorText('variables-failed', String((err as Error)?.message ?? err));
+        return fromError(manager, 'variables-failed', err);
+      }
+    }
+  );
+
+  server.registerTool(
+    'get_logs',
+    {
+      title: 'Read console errors and the play journal',
+      description:
+        'console: JS exceptions, console errors and HTTP failures from the page (QA). journal: passages visited and choices taken. all (default): both.',
+      inputSchema: {
+        game_id: gameIdParam,
+        kind: z.enum(['console', 'journal', 'all']).optional().describe('Which log to read (default "all").'),
+        clear: z.boolean().optional().describe('Clear the selected log after reading (default false).'),
+        limit: z.number().int().min(1).max(500).optional().describe('Journal entries to show, last N (default 50).')
+      }
+    },
+    async ({ game_id, kind, clear, limit }) => {
+      try {
+        const session = manager.resolve(game_id);
+        const want = kind ?? 'all';
+        const parts: string[] = [];
+
+        if (want === 'console' || want === 'all') {
+          const body = renderConsole(session.console);
+          if (want === 'all') parts.push(`Console (${session.console.length}):\n${body}`);
+          else parts.push(body);
+          if (clear) session.console = [];
+        }
+
+        if (want === 'journal' || want === 'all') {
+          const entries = session.journal;
+          if (!entries.length) {
+            parts.push('Journal: empty (no actions taken yet).');
+          } else {
+            const shown = entries.slice(-(limit ?? 50));
+            const visited = new Set(entries.map((e) => e.passage).filter(Boolean));
+            const lines = shown.map((e) => `#${e.step} ${e.passage ?? '?'} — ${e.action}${e.target ? ` -> ${e.target}` : ''}`);
+            const header = `Journal: ${entries.length} action(s), ${visited.size} distinct passage(s) visited. Showing last ${shown.length}.`;
+            parts.push(header + '\n' + lines.join('\n'));
+          }
+          if (clear) session.journal = [];
+        }
+
+        return text(parts.join('\n\n'));
+      } catch (err) {
+        return fromError(manager, 'logs-failed', err);
       }
     }
   );
@@ -546,37 +617,38 @@ export function buildServer(manager: SessionManager): McpServer {
     {
       title: 'Upload a file into the game',
       description:
-        'Upload a local file (mod .zip, exported .save, image) into an <input type=file> in the game. ' +
-        'Provide trigger_text/trigger_ref for buttons that open a picker ("Load from File…", "Import"), or let it target the file input directly. ' +
-        'If a hardcoded selector like #saves-import does not exist in the build, use find_ui("Load from File") and pass its ref as trigger_ref. ' +
-        'Returns the new observation (text; format:"json" for JSON).',
+        'Upload a local file (mod .zip, .save, image) into an <input type=file>. Pass trigger to click the button that opens the picker, or file_input for the input itself. Searches all frames when neither is given.',
       inputSchema: {
-        game_id: gameId,
-        path: z.string().describe('Absolute path of the file on the machine running this MCP server.'),
-        trigger_text: z.string().optional().describe('Visible text of the button that opens the file picker.'),
-        trigger_ref: z.string().optional().describe('Ref of the trigger button (alternative to trigger_text).'),
-        trigger_selector: z.string().optional().describe('CSS selector of the trigger button (e.g. "#saves-import").'),
-        selector: z.string().optional().describe('CSS selector of an <input type=file> (used when no trigger is given).'),
-        ref: z.string().optional().describe('Ref of a file input from inspect_ui (alternative to selector).'),
+        game_id: gameIdParam,
+        file_path: z.string().describe('Absolute path of the file on the machine running this MCP server.'),
+        trigger: z.string().optional().describe('Button that opens the picker: a ref from find_ui, a CSS selector, or visible text.'),
+        file_input: z.string().optional().describe('The <input type=file> itself: a ref from find_ui, or a CSS selector.'),
         format: formatParam
       }
     },
-    async ({ game_id, path, trigger_text, trigger_ref, trigger_selector, selector, ref, format }) => {
+    async ({ game_id, file_path, trigger, file_input, format }) => {
       try {
-        const session = manager.get(game_id);
-        const res = await manager.uploadFile(session, { path, ref, triggerText: trigger_text, triggerRef: trigger_ref, triggerSelector: trigger_selector, selector });
+        const session = manager.resolve(game_id);
+        // A ref is a bare token; anything else is treated as a CSS selector by the bridge.
+        const isSelector = (s: string) => /[#.[\]:>+~\s]/.test(s);
+        const res = await manager.uploadFile(session, {
+          path: file_path,
+          // The bridge resolves `trigger` as ref / selector / visible text.
+          ...(file_input ? (isSelector(file_input) ? { selector: file_input } : { ref: file_input }) : {}),
+          ...(trigger ? { trigger } : {})
+        });
         if (!res.ok) {
           return errResult(res.error ?? 'upload-failed', res.message, {
             hint:
               res.error === 'no-file-input'
-                ? 'Find the import button with find_ui("Load from File") / find_ui("Import") and pass its ref as trigger_ref.'
-                : 'Check the file path and the trigger selector/ref.',
+                ? 'Find the import button with find_ui("Load from File") / find_ui("Import") and pass its ref as trigger.'
+                : 'Check the file path and the trigger.',
             passage: session.lastObservation?.passage ?? null
           });
         }
-        return observationResult(session, res.observation!, { format, prefix: `Uploaded "${path}".`, action: { upload: path } });
+        return observationResult(session, res.observation!, { format, prefix: `Uploaded "${file_path}".`, action: { upload: file_path } });
       } catch (err) {
-        return errorText('upload-failed', String((err as Error)?.message ?? err));
+        return fromError(manager, 'upload-failed', err);
       }
     }
   );
@@ -584,138 +656,77 @@ export function buildServer(manager: SessionManager): McpServer {
   server.registerTool(
     'download_file',
     {
-      title: 'Save a captured browser download to a file',
+      title: 'Browser downloads (list / save / newest)',
       description:
-        'Browser file control for any game: every download is captured into the tool\'s download folder (see list_downloads). ' +
-        'Three modes: (a) pass trigger_text/trigger_ref/trigger_selector to click the game\'s download button and take that file; ' +
-        '(b) pass name or index to take an already-captured file from the folder; (c) pass none of those to take the newest file in the folder. ' +
-        'Without `path` the file stays in the download folder (path = its location); with `path` (a file or a directory) a copy is placed there too. ' +
-        'Returns the path, size and the new observation.',
+        'Every browser download is captured into a persistent folder. list: show it. save: copy a captured file (pass trigger to click the game\'s export button first). newest: take the newest capture.',
       inputSchema: {
-        game_id: gameId,
-        path: z.string().optional().describe('Destination file or directory (default <cwd>/downloads/<name>).'),
-        trigger_text: z.string().optional().describe('Visible text of the button that starts the download (optional).'),
-        trigger_ref: z.string().optional().describe('Ref of the download button (alternative to trigger_text).'),
-        trigger_selector: z.string().optional().describe('CSS selector of the download button (alternative to trigger_text).'),
-        name: z.string().optional().describe('Name of an already-captured file from list_downloads (exact, suffix, or unique substring).'),
-        index: z.number().int().min(1).max(200).optional().describe('1-based index from list_downloads (newest first).'),
-        timeout_ms: z.number().int().min(1000).max(120000).optional().describe('How long to wait for the download after clicking (default 30000).'),
+        game_id: gameIdParam,
+        action: z.enum(['list', 'save', 'newest']).describe('list the folder, save a captured file, or take the newest one.'),
+        trigger: z.string().optional().describe('For action:"save": click this first — a ref, a CSS selector, or visible text.'),
+        name: z.string().optional().describe('Captured file name (exact, suffix, or unique substring).'),
+        index: z.number().int().min(1).max(200).optional().describe('1-based index from action:"list" (newest first).'),
+        dest_file: z.string().optional().describe('Exact destination file path (written even if it exists).'),
+        dest_dir: z.string().optional().describe('Destination directory; the captured file name is kept.'),
+        timeout_ms: z.number().int().min(1000).max(120000).optional().describe('How long to wait for a download after clicking the trigger (default 30000).'),
+        limit: z.number().int().min(1).max(200).optional().describe('For action:"list": max files (default 20).'),
         format: formatParam
       }
     },
-    async ({ game_id, path: dest, trigger_text, trigger_ref, trigger_selector, name, index, timeout_ms, format }) => {
+    async ({ game_id, action, trigger, name, index, dest_file, dest_dir, timeout_ms, limit, format }) => {
       try {
-        const session = manager.get(game_id);
-        const res = await manager.downloadFile(session, {
-          path: dest,
-          ref: trigger_ref,
-          text: trigger_text,
-          selector: trigger_selector,
+        const session = action === 'list' ? undefined : manager.resolve(game_id);
+
+        if (action === 'list') {
+          const res = await manager.listDownloads(limit ?? 20);
+          const fallbackNote = res.fellBack
+            ? `\n(preferred folder unusable — ${res.fallbackReason ?? 'unknown reason'}; using this one instead)`
+            : '';
+          if (!res.files.length) {
+            return text(`Download folder: ${res.dir}${fallbackNote}\n(empty — trigger a download first, e.g. the game's save/export button)`);
+          }
+          const lines = [
+            `Download folder: ${res.dir} (${res.total} file${res.total === 1 ? '' : 's'}, newest first${res.total > res.files.length ? `, showing ${res.files.length}` : ''}):${fallbackNote}`
+          ];
+          res.files.forEach((f, i) => {
+            const when = new Date(f.mtime).toISOString().replace('T', ' ').slice(0, 16);
+            lines.push(`  ${i + 1}. ${f.name} — ${f.bytes} B — ${when}`);
+          });
+          lines.push('Use action:"save" with name/index to copy one anywhere.');
+          return text(lines.join('\n'));
+        }
+
+        const dest = dest_file ?? dest_dir;
+        const res = await manager.downloadFile(session!, {
+          // The bridge resolves `trigger` as ref / selector / visible text.
+          ...(trigger ? { target: trigger } : {}),
           name,
-          index,
+          index: action === 'newest' && !name && index === undefined ? 1 : index,
+          path: dest,
+          // A destination directory must be treated as one even before it exists.
+          destIsDir: dest_dir !== undefined,
           timeoutMs: timeout_ms
         });
         if (!res.ok) {
           return errResult(res.error ?? 'download-failed', res.message, {
             hint:
               res.error === 'no-download'
-                ? 'Run list_downloads to see captured files, or pass trigger_text/trigger_ref to click the game\'s download button.'
-                : 'Check the file name/index (list_downloads) or the trigger.',
-            passage: session.lastObservation?.passage ?? null
+                ? 'Run download_file(action:"list") to see captured files, or pass trigger to click the game\'s download button.'
+                : 'Check the file name/index (action:"list") or the trigger.',
+            passage: session?.lastObservation?.passage ?? null
           });
         }
         const prefix = `Saved "${res.filename ?? 'file'}" -> ${res.path} (${res.bytes ?? 0} B${res.copied ? ', copied' : ''}${res.overwrote ? ', overwrote existing file' : ''})`;
-        return observationResult(session, res.observation!, {
+        if (!trigger) {
+          // No game element was touched, so the passage cannot have changed.
+          return text(`${prefix}\n(game state unchanged)`);
+        }
+        return observationResult(session!, res.observation!, {
           format,
           prefix,
           action: { path: res.path ?? null, source: res.source ?? null, filename: res.filename ?? null, bytes: res.bytes ?? 0, copied: !!res.copied }
         });
       } catch (err) {
-        return errorText('download-failed', String((err as Error)?.message ?? err));
-      }
-    }
-  );
-
-  server.registerTool(
-    'list_downloads',
-    {
-      title: 'List captured browser downloads',
-      description:
-        'List files captured from the browser into the tool\'s download folder (any game; the folder persists across sessions and MCP restarts). ' +
-        'Use download_file(name|index, path) to copy one anywhere. Shows name, size, capture time and the absolute folder path.',
-      inputSchema: {
-        limit: z.number().int().min(1).max(200).optional().describe('Max files to list (default 20, newest first).')
-      }
-    },
-    async ({ limit }) => {
-      try {
-        const res = await manager.listDownloads(limit ?? 20);
-        if (!res.files.length) {
-          return text(`Download folder: ${res.dir}\n(empty — trigger a download first, e.g. the game's save/export button)`);
-        }
-        const lines = [
-          `Download folder: ${res.dir} (${res.total} file${res.total === 1 ? '' : 's'}, newest first${res.total > res.files.length ? `, showing ${res.files.length}` : ''}):`
-        ];
-        res.files.forEach((f, i) => {
-          const when = new Date(f.mtime).toISOString().replace('T', ' ').slice(0, 16);
-          lines.push(`  ${i + 1}. ${f.name} — ${f.bytes} B — ${when}`);
-        });
-        lines.push('Use download_file(name=..., path=...) to copy one anywhere.');
-        return text(lines.join('\n'));
-      } catch (err) {
-        return errorText('list-downloads-failed', String((err as Error)?.message ?? err));
-      }
-    }
-  );
-
-  server.registerTool(
-    'inspect_ui',
-    {
-      title: 'Inspect a UI panel',
-      description:
-        'Inspect DOM outside the passage. Pass a CSS selector to get its text, buttons (with refs usable in click_ui) and inputs (file inputs usable in upload_file). ' +
-        'Without a selector, lists overlay panels (mod GUIs, dev panels) that contain buttons or file inputs.',
-      inputSchema: {
-        game_id: gameId,
-        selector: z.string().optional().describe('CSS selector of the panel to inspect; omit to discover overlay panels.')
-      }
-    },
-    async ({ game_id, selector }) => {
-      try {
-        const session = manager.get(game_id);
-        const res = await manager.inspectUi(session, selector);
-        if (!res.ok) return errorText(res.error ?? 'inspect-failed', res.message);
-        if (!selector) {
-          const cands = (res.candidates ?? []) as Array<Record<string, unknown>>;
-          if (!cands.length) return text('No overlay panels discovered. Pass a CSS selector to inspect a specific element.');
-          return text(
-            'Panels:\n' +
-              cands
-                .map(
-                  (c, i) =>
-                    `${i + 1}. ${c.frame ? '[iframe] ' : ''}${c.selector} — ${c.buttons} buttons, ${c.inputs} inputs, ${c.fileInputs} file inputs: ${String(c.text ?? '').slice(0, 90)}`
-                )
-                .join('\n') +
-              '\n\nTip: upload_file without a selector searches all frames for a file input; click_ui by text also works inside iframes.'
-          );
-        }
-        const lines = [`# ${res.selector}${res.frame ? ' (iframe)' : ''}`, res.text ?? ''];
-        if (res.buttons?.length) {
-          lines.push('', 'Buttons:');
-          res.buttons.forEach((b, i) => lines.push(`  ${i + 1}. ${b.label}${b.ref ? ` [${b.ref}]` : ' (use click_ui text)'}`));
-        }
-        if (res.inputs?.length) {
-          lines.push('', 'Inputs:');
-          for (const inp of res.inputs) {
-            lines.push(
-              `  ${inp.ref || '(file input — use upload_file)'} ${inp.kind}${inp.label ? ` "${inp.label.slice(0, 40)}"` : ''}${inp.name ? ` name="${inp.name}"` : ''}${inp.value ? ` value="${String(inp.value).slice(0, 40)}"` : ''}` +
-                (inp.checked !== undefined ? ` checked=${inp.checked}` : '')
-            );
-          }
-        }
-        return text(lines.join('\n'));
-      } catch (err) {
-        return errorText('inspect-ui-failed', String((err as Error)?.message ?? err));
+        return fromError(manager, 'download-failed', err);
       }
     }
   );
@@ -725,118 +736,38 @@ export function buildServer(manager: SessionManager): McpServer {
     {
       title: 'Screenshot the game',
       description:
-        'Take a PNG screenshot of the game viewport. Useful for canvas/image-driven games and visual QA. Pass path to save it to a file (returns the path instead of the image). ' +
-        'One-shot: this is not a live view — to let the user watch the game, call live_view once instead of taking screenshots repeatedly.',
+        'PNG of the game viewport — canvas games, visual QA. Pass path to save it to disk instead of returning the image. One-shot: use live_view to let the user watch.',
       inputSchema: {
-        game_id: gameId,
-        path: z.string().optional().describe('Optional output file path; when set, the PNG is written there and only the path is returned.')
+        game_id: gameIdParam,
+        path: z.string().optional().describe('Write the PNG here and return the path instead of the image.')
       }
     },
     async ({ game_id, path }) => {
       try {
-        const session = manager.get(game_id);
+        const session = manager.resolve(game_id);
         const buf = await manager.screenshot(session, path);
         if (path) return text(`Screenshot saved: ${path} (${buf.length} bytes)`);
         return { content: [{ type: 'image' as const, data: buf.toString('base64'), mimeType: 'image/png' }] };
       } catch (err) {
-        return errorText('screenshot-failed', String((err as Error)?.message ?? err));
+        return fromError(manager, 'screenshot-failed', err);
       }
-    }
-  );
-
-  server.registerTool(
-    'get_console_errors',
-    {
-      title: 'Get console errors',
-      description: 'Return JavaScript errors/warnings captured from the page (useful for playtesting / QA).',
-      inputSchema: {
-        game_id: gameId,
-        clear: z.boolean().optional().describe('Clear the buffer after reading (default false).')
-      }
-    },
-    async ({ game_id, clear }) => {
-      try {
-        const session = manager.get(game_id);
-        const body = renderConsole(session.console);
-        if (clear) session.console = [];
-        return text(body);
-      } catch (err) {
-        return errorText('console-failed', String((err as Error)?.message ?? err));
-      }
-    }
-  );
-
-  server.registerTool(
-    'get_journal',
-    {
-      title: 'Get the play journal',
-      description:
-        'Return this session\'s action history: every passage visited and every choice taken (including back/load events). ' +
-        'Useful to summarise a playthrough, resume a run, or report coverage for QA.',
-      inputSchema: {
-        game_id: gameId,
-        limit: z.number().int().min(1).max(500).optional().describe('Show the last N entries (default 50).'),
-        clear: z.boolean().optional().describe('Clear the journal after reading (default false).')
-      }
-    },
-    async ({ game_id, limit, clear }) => {
-      try {
-        const session = manager.get(game_id);
-        const entries = session.journal;
-        if (!entries.length) return text('Journal is empty (no actions taken yet).');
-        const shown = entries.slice(-(limit ?? 50));
-        const visited = new Set(entries.map((e) => e.passage).filter(Boolean));
-        const lines = shown.map(
-          (e) => `#${e.step} ${e.passage ?? '?'} — ${e.action}${e.target ? ` -> ${e.target}` : ''}`
-        );
-        const header = `Journal: ${entries.length} action(s), ${visited.size} distinct passage(s) visited. Showing last ${shown.length}.`;
-        if (clear) session.journal = [];
-        return text(header + '\n' + lines.join('\n'));
-      } catch (err) {
-        return errorText('journal-failed', String((err as Error)?.message ?? err));
-      }
-    }
-  );
-
-  server.registerTool(
-    'list_games',
-    {
-      title: 'List open games',
-      description: 'List the currently open game sessions with their id, source, story title and step count.',
-      inputSchema: {}
-    },
-    async () => {
-      if (!manager.sessions.size) return text('No open games.');
-      const lines = [...manager.sessions.values()].map(
-        (s) =>
-          `${s.id} · ${s.lastObservation?.story?.title ?? s.lastObservation?.title ?? '(unknown)'} · ${s.lastObservation?.format ?? '?'} · step ${s.step} · ${s.source}`
-      );
-      return text(lines.join('\n'));
     }
   );
 
   server.registerTool(
     'live_view',
     {
-      title: 'Open a live view of the game page',
+      title: 'Show the game to the user',
       description:
-        'Give the user eyes on the actual page the agent is controlling: starts a tiny local web server (once per MCP process) that streams ' +
-        'JPEG screenshots of the real Playwright tab (~1/s) together with passage, step, engine state, recent actions and the passage text. ' +
-        'Returns a URL like http://127.0.0.1:4571/v/game_abc — open it in any browser (works with headless games too). ' +
-        'Frames are captured only while someone is watching. Set open:true to also launch the URL in the default browser. ' +
-        'DISPLAY POLICY: this is the default — and usually the only — way to show a game. One view per game: do not also switch to a headed window ' +
-        'or loop screenshot; repeated calls return the same URL and never launch a second browser tab.',
+        'Show the user the real page the agent drives: a local URL streaming JPEG frames (~1/s) plus passage, step, actions. Works headless. open:true launches the default browser. Repeat calls return the same URL.',
       inputSchema: {
-        game_id: gameId,
-        open: z
-          .boolean()
-          .optional()
-          .describe('Also open the URL in the default browser on this machine (default false). Only pass true when the user wants you to open it — at most once per game.')
+        game_id: gameIdParam,
+        open: z.boolean().optional().describe('Also open the URL in the default browser (at most once per game).')
       }
     },
     async ({ game_id, open }) => {
       try {
-        const session = manager.get(game_id);
+        const session = manager.resolve(game_id);
         const url = await liveViewUrl(manager, session);
         const headed = manager.browserIsHeaded;
         let openNote = '';
@@ -852,33 +783,48 @@ export function buildServer(manager: SessionManager): McpServer {
             openNote = 'A browser was already opened for this game earlier — reuse that tab; the URL is unchanged. ';
           }
         }
+        const head = headed ? 'NOTE: headed (visible) browser window in use — one view is enough; do not open another.\n' : '';
+        // The URL is stable, so only the first call needs the explanation.
+        if (!claimFirstReport(session.id)) {
+          return text(`${head}Live view for ${session.id}: ${url}${openNote ? `\n${openNote.trim()}` : ''}`);
+        }
         return text(
-          (headed ? 'NOTE: headed (visible) browser window in use — one view is enough; do not open another.\n' : '') +
+          head +
             `Live view for ${session.id}: ${url}\n` +
             openNote +
-            `Refreshes ~1/s and shows passage/step/journal. Attaches to the running tab; nothing needs restarting. ` +
-            `Display policy: one view per game — reuse an open view instead of stacking another.`
+            'Refreshes ~1/s and shows passage/step/journal. Display policy: one view per game — reuse an open view instead of stacking another.'
         );
       } catch (err) {
-        return errorText('live-view-failed', String((err as Error)?.message ?? err));
+        return fromError(manager, 'live-view-failed', err);
       }
     }
   );
 
   server.registerTool(
-    'close_game',
+    'session',
     {
-      title: 'Close a game',
-      description: 'Close the browser tab and static server for a game session.',
-      inputSchema: { game_id: gameId }
+      title: 'Manage game sessions',
+      description: 'list: the open games (id, title, format, step, source). close: shut one down, including its browser context and static server.',
+      inputSchema: {
+        action: z.enum(['list', 'close']).describe('list open games, or close one.'),
+        game_id: gameIdParam
+      }
     },
-    async ({ game_id }) => {
+    async ({ action, game_id }) => {
+      if (action === 'list') {
+        const games = manager.listSessions();
+        if (!games.length) return text('No open games.');
+        return text(
+          games.map((g) => `${g.id} · ${g.title} · ${g.format} · step ${g.step} · ${g.source}`).join('\n')
+        );
+      }
       try {
-        const ok = await manager.close(game_id);
-        if (ok) forgetLiveView(game_id);
-        return text(ok ? `Closed ${game_id}.` : `No such game: ${game_id}.`, !ok);
+        const session = manager.resolve(game_id);
+        const ok = await manager.close(session.id);
+        if (ok) forgetLiveView(session.id);
+        return text(ok ? `Closed ${session.id}.` : `No such game: ${session.id}.`, !ok);
       } catch (err) {
-        return errorText('close-failed', String((err as Error)?.message ?? err));
+        return fromError(manager, 'close-failed', err);
       }
     }
   );

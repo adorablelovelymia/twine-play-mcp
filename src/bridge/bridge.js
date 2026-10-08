@@ -655,7 +655,7 @@
   };
 
   const clickRef = (ref) => {
-    const el = document.querySelector('[data-twmcp-ref="' + String(ref).replace(/["\\]/g, '') + '"]');
+    const el = findByRef(ref);
     if (!el) return { ok: false, error: 'stale-ref', message: 'Ref ' + ref + ' no longer exists; call observe again.' };
     try {
       el.scrollIntoView({ block: 'center', inline: 'nearest' });
@@ -683,7 +683,7 @@
   };
 
   const fillRef = (ref, value) => {
-    const el = document.querySelector('[data-twmcp-ref="' + String(ref).replace(/["\\]/g, '') + '"]');
+    const el = findByRef(ref);
     if (!el) return { ok: false, error: 'stale-ref' };
     try {
       el.focus({ preventScroll: true });
@@ -698,6 +698,23 @@
 
   let refSeq = 0;
   const nextRef = (prefix) => prefix + (++refSeq);
+
+  /** The element a ref points at, or null. Refs are sanitised because they end up in a selector. */
+  const findByRef = (ref) => {
+    const clean = String(ref == null ? '' : ref).replace(/["\\]/g, '');
+    if (!clean) return null;
+    return document.querySelector('[data-twmcp-ref="' + clean + '"]');
+  };
+
+  /** Give an element a ref if it does not have one yet, and return it. */
+  const ensureRef = (el, prefix) => {
+    let ref = el.getAttribute('data-twmcp-ref');
+    if (!ref) {
+      ref = nextRef(prefix || 'x');
+      el.setAttribute('data-twmcp-ref', ref);
+    }
+    return ref;
+  };
 
   // Labels are included on purpose: SugarCube's <<radiobutton>>/<<checkbox>> macros and many
   // Twine UIs render options as <label> elements with the real input hidden inside.
@@ -724,29 +741,51 @@
     return normalize(el.innerText || el.value || el.getAttribute('aria-label') || el.title || '').slice(0, 200);
   };
 
-  /** Resolve a UI element by ref, CSS selector or visible text into a data-twmcp-ref. */
+  /**
+   * Resolve a UI element into a data-twmcp-ref.
+   *
+   * Accepts `{ref}`, `{selector}`, `{text, exact}` — or `{target}` with any of those forms, which
+   * is how the MCP tools expose a single "point at this thing" parameter: an agent should not have
+   * to know whether the thing it can see is a ref, a CSS selector or a visible label.
+   */
   const resolveUi = (opts) => {
     const o = opts || {};
-    if (o.ref) {
-      const ref = String(o.ref).replace(/["\\]/g, '');
-      const el = document.querySelector('[data-twmcp-ref="' + ref + '"]');
-      return el ? { ok: true, ref } : { ok: false, error: 'stale-ref', message: 'Ref ' + ref + ' no longer exists. Call observe() to refresh refs.' };
-    }
-    if (o.selector) {
+    const asSelector = (sel) => {
       let el = null;
       try {
-        el = document.querySelector(String(o.selector));
-      } catch (e) {
-        return { ok: false, error: 'bad-selector', message: String((e && e.message) || e) };
+        el = document.querySelector(String(sel));
+      } catch (_) {
+        return { ok: false, error: 'bad-selector' };
       }
-      if (!el) return { ok: false, error: 'no-match', message: 'No element matches selector "' + o.selector + '".' };
+      if (!el) return { ok: false, error: 'no-match' };
       const target = clickTargetOf(el);
-      let ref = target.getAttribute('data-twmcp-ref');
-      if (!ref) {
-        ref = nextRef('x');
-        target.setAttribute('data-twmcp-ref', ref);
-      }
-      return { ok: true, ref, label: clickableLabel(target) };
+      return { ok: true, ref: ensureRef(target), label: clickableLabel(target) };
+    };
+
+    let explicit = o.ref || o.selector || o.text;
+    if (o.target != null && !explicit) {
+      const s = String(o.target);
+      const refInSelector = /^\[data-twmcp-ref=["']?([^"'\]\s]+)["']?\]$/.exec(s);
+      if (refInSelector) o.ref = refInSelector[1];
+      else if (/[#.[\]:>+~]/.test(s)) o.selector = s;         // clearly a selector
+      else if (/^[a-zA-Z][a-zA-Z0-9-]*$/.test(s)) o.text = s; // a bare word: treat as a label
+      else o.text = s;
+    }
+
+    if (o.ref) {
+      const ref = String(o.ref).replace(/["\\]/g, '');
+      const el = findByRef(ref);
+      return el ? { ok: true, ref } : { ok: false, error: 'stale-ref', message: 'Ref ' + ref + ' no longer exists. Call observe() to refresh refs.' };
+    }
+
+    if (o.selector) {
+      const hit = asSelector(o.selector);
+      if (hit.ok) return hit;
+      // A selector the DOM does not have (or a bare tag name that is really a label):
+      // keep going and try text, so one "point at this thing" parameter can cover both.
+      if (hit.error === 'no-match' && !o.text && !/^[#.[]/.test(String(o.selector))) o.text = String(o.selector);
+      else if (hit.error === 'bad-selector' && !o.text) o.text = String(o.selector);
+      else if (!o.text) return { ok: false, error: hit.error, message: 'No element matches selector "' + o.selector + '".' };
     }
     if (o.text) {
       const needle = normalizeLabelText(o.text);
@@ -772,11 +811,7 @@
       cands.sort((a, b) => a.label.length - b.label.length);
       const pick = cands[0];
       const target = clickTargetOf(pick.el);
-      let ref = target.getAttribute('data-twmcp-ref');
-      if (!ref) {
-        ref = nextRef('x');
-        target.setAttribute('data-twmcp-ref', ref);
-      }
+      const ref = ensureRef(target);
       return {
         ok: true,
         ref,
@@ -826,11 +861,7 @@
       total++;
       if (matches.length >= limit) continue;
       const target = clickTargetOf(el);
-      let ref = target.getAttribute('data-twmcp-ref');
-      if (!ref) {
-        ref = nextRef('x');
-        target.setAttribute('data-twmcp-ref', ref);
-      }
+      const ref = ensureRef(target);
       const m = { ref, kind, label, tag };
       const name = el.getAttribute('name');
       if (name) m.name = name;
@@ -965,16 +996,6 @@
       inputs.push(d);
     }
     return { ok: true, selector: String(o.selector), text, buttons, inputs };
-  };
-
-  const pressKey = (key) => {    try {
-      const target = document.activeElement || document.body;
-      target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
-      target.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true, cancelable: true }));
-      return { ok: true, target: target.tagName || null };
-    } catch (e) {
-      return { ok: false, error: 'press-failed', message: String(e && e.message || e) };
-    }
   };
 
   const restart = () => {
@@ -1127,21 +1148,8 @@
     }
   };
 
-  const ping = () => ({
-    ok: true,
-    ready: document.readyState,
-    format: detectFormat(),
-    hasSugarCube: !!window.SugarCube,
-    hasEngine: !!window.Engine,
-    hasState: !!window.State,
-    hasStory: !!window.story,
-    hasHarlowe: !!window.Harlowe,
-    hasChapbookEngine: !!(window.engine && window.engine.state)
-  });
-
   window.__twineMCP = {
-    version: 0.1,
-    ping,
+    version: 0.2,
     observe,
     waitStable,
     clickRef,
@@ -1149,15 +1157,14 @@
     findUi,
     inspectUi,
     fillRef,
-    pressKey,
     restart,
     back,
     goTo,
     snapshot,
     restore,
     seed,
-    meta: storyMeta,
     getVariables,
-    detectFormat
+    // `detectFormat` stays internal: nothing outside the bridge needs it.
+    meta: storyMeta
   };
 })();
