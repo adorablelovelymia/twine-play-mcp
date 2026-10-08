@@ -1,6 +1,6 @@
 {
   "name": "twine-play-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "MCP server that lets AI agents play, test and QA Twine / interactive-fiction HTML games.",
   "type": "module",
   "license": "MIT",
@@ -37,7 +37,7 @@
     "CONTRIBUTING.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && mkdir -p dist/bridge && cp src/bridge/bridge.js dist/bridge/bridge.js",
+    "build": "tsc -p tsconfig.json && mkdir -p dist/bridge && cp src/bridge/bridge.js dist/bridge/bridge.js && chmod +x dist/index.js",
     "prepublishOnly": "npm run build",
     "dev": "tsx src/index.ts",
     "test": "npm run build && tsx scripts/formats.ts && tsx scripts/tools.ts --check && tsx scripts/tools.ts --budget && tsx scripts/docs.ts --check",

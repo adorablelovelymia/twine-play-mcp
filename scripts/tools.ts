@@ -11,7 +11,7 @@
  * Measured through a real MCP client over stdio on purpose: that is the exact JSON a client
  * receives, including the Zod-derived schemas — reading the server internals would undercount them.
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { mcpClient, REPO_ROOT } from './_harness.js';
 
@@ -78,6 +78,18 @@ const fail = (msg: string) => {
   failures++;
 };
 const pass = (msg: string) => console.log(`  ✓ ${msg}`);
+
+// The bin entry point has to survive packing as executable, or `npx twine-play-mcp` fails with
+// "command not found" — tsc emits plain files, so `npm run build` chmods it. Checked here because
+// this is the publish-health script.
+const binPath = path.join(REPO_ROOT, 'dist', 'index.js');
+if (!existsSync(binPath)) {
+  fail(`dist/index.js is missing (run \`npm run build\`)`);
+} else if (!(statSync(binPath).mode & 0o111)) {
+  fail(`dist/index.js is not executable (mode ${statSync(binPath).mode.toString(8)}) — \`npx twine-play-mcp\` would fail; run \`npm run build\``);
+} else {
+  pass('bin entry point is executable');
+}
 
 if (budget) {
   if (surface.totalBytes > SURFACE_BUDGET_BYTES) {
