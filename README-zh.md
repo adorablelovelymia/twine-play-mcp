@@ -157,11 +157,14 @@ live_view({})                  # 把一个能实时观看真实页面的 URL 交
 
 | 格式 | 识别 | 文本／选项 | `get_variables` | 段落名 | `navigate(back)` | `snapshot` |
 | --- | --- | --- | --- | --- | --- | --- |
-| **SugarCube 2.21+** | ✅ | ✅ | ✅ `State.variables` | ✅ | ✅ `Engine.backward` | ✅ `Save.base64` / `Save.deserialize` |
-| **Harlowe 3** | ✅ | ✅ | —（引擎内部不公开） | — | ✅ 侧边栏撤销 | — |
+| **SugarCube 2.21+** | ✅ | ✅ | ✅ `State.variables` | ✅ | ✅ `Engine.backward` | ✅ `Save.base64` / `Save.deserialize`（遵循 `Config.saves.isAllowed`） |
+| **Harlowe 3** | ✅ | ✅ | —（引擎内部不公开） | ✅ `Saved Session` 轨迹 | ✅ 侧边栏撤销 | — |
 | **Snowman 2** | ✅ | ✅ | —（改用 `observe(include_variables:true)`） | ✅ | — | ✅ 状态 JSON |
 | **Chapbook 1** | ✅ | ✅ | —（改用 `observe(include_variables:true)`） | ✅ `trail` | — | ✅ `restoreFromObject` |
 | **未知 HTML** | 通用 | ✅ DOM 启发式 | — | — | — | — |
+
+当游戏自己禁止存档时（SugarCube 的 `Config.saves.isAllowed()`，通常来自 `NoSave` 标签），
+`snapshot` 会返回 `saving-disallowed`，而不是把引擎的异常直接抛给调用方。
 
 `observe` 同样能读到 Snowman（`story.state`）与 Chapbook（`engine.state`）的变量，只有
 `get_variables` 的点路径查询是 SugarCube 专属。一切都会优雅降级：未知格式仍可走通用 DOM 路径

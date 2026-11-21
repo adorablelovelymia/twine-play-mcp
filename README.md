@@ -161,11 +161,14 @@ check, never a stream. The server ships this policy in its MCP `instructions` fi
 
 | Format | Detect | Text / choices | `get_variables` | Passage name | `navigate(back)` | `snapshot` |
 | --- | --- | --- | --- | --- | --- | --- |
-| **SugarCube 2.21+** | ✅ | ✅ | ✅ `State.variables` | ✅ | ✅ `Engine.backward` | ✅ `Save.base64` / `Save.deserialize` |
-| **Harlowe 3** | ✅ | ✅ | — (engine internals are private) | — | ✅ sidebar undo | — |
+| **SugarCube 2.21+** | ✅ | ✅ | ✅ `State.variables` | ✅ | ✅ `Engine.backward` | ✅ `Save.base64` / `Save.deserialize` (respects `Config.saves.isAllowed`) |
+| **Harlowe 3** | ✅ | ✅ | — (engine internals are private) | ✅ `Saved Session` trail | ✅ sidebar undo | — |
 | **Snowman 2** | ✅ | ✅ | — (use `observe(include_variables:true)`) | ✅ | — | ✅ state JSON |
 | **Chapbook 1** | ✅ | ✅ | — (use `observe(include_variables:true)`) | ✅ `trail` | — | ✅ `restoreFromObject` |
 | **Unknown HTML** | generic | ✅ DOM heuristics | — | — | — | — |
+
+`snapshot` refuses with `saving-disallowed` on a passage the game itself blocks (SugarCube's
+`Config.saves.isAllowed()`, typically a `NoSave` tag) instead of surfacing the engine's own throw.
 
 `observe` reads variables for Snowman (`story.state`) and Chapbook (`engine.state`) as well; only
 `get_variables`' dot-path lookup is SugarCube-specific. Everything degrades gracefully: an unknown

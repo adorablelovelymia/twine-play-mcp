@@ -48,8 +48,9 @@ for (const c of CASES) {
     const session = await manager.open({ source: fixture(c.name), headless: true, waitTimeoutMs: 15000 });
     const obs = session.lastObservation!;
     check(c.name, 'format detected', obs.format === c.expectFormat, obs.format);
-    if (c.expectFormat === 'harlowe') console.log(`    passage name => ${obs.passage ?? 'unavailable (Harlowe keeps it inside its engine)'}`);
-    else check(c.name, 'passage name', !!obs.passage, String(obs.passage));
+    // Harlowe 3 exposes no Engine/State globals, so the name comes from its own sessionStorage
+    // trail — pinned by name-and-advance below instead of just "not null".
+    check(c.name, 'passage name', !!obs.passage, String(obs.passage));
     check(c.name, 'text extracted', obs.text.toLowerCase().includes(c.expectText.toLowerCase()), `${obs.text.length} chars`);
     check(c.name, 'choices found', obs.choices.length >= 2, obs.choices.map((x) => x.label).join(' | '));
     check(c.name, 'variables readable', c.expectVariables ? !!obs.variables : true, `${obs.variables === null ? 'null' : JSON.stringify(obs.variables).slice(0, 120)}`);

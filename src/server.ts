@@ -433,9 +433,11 @@ export function buildServer(manager: SessionManager): McpServer {
         if (action === 'save') {
           const res = await manager.saveState(session, key);
           if (!res.ok) {
-            return errResult(res.error ?? 'save-failed', res.message, {
-              hint: 'No snapshot API for this story format — use a before/after variable diff via get_variables instead.'
-            });
+            const hint =
+              res.error === 'saving-disallowed'
+                ? 'The game blocks saving on this passage (a NoSave tag or a scripted rule). Play on to a normal passage, or compare before/after state with get_variables.'
+                : 'No snapshot API for this story format — use a before/after variable diff via get_variables instead.';
+            return errResult(res.error ?? 'save-failed', res.message, { hint });
           }
           const names = manager.listSnapshots(session).map((s) => s.name);
           return text(`Saved snapshot "${key}" (${res.bytes} chars). Snapshots: ${names.join(', ')}.`);

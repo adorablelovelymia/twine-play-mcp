@@ -22,7 +22,7 @@ const USAGE = `usage: npx tsx scripts/debug.ts <diag|vars|dom|probe> [game-or-fi
   diag  [game] [steps=5]   live network + console trace, then walk a few steps
   vars  [game] [steps=3]   diff story variables across a snapshot round trip
   dom   [game] [steps=3]   dump passage/status/link HTML and the CSS rules that match
-  probe [fixture=snowman]  dump a compiled fixture's DOM and engine globals
+  probe [game|fixture]    dump a page's DOM and engine globals (a path, or a fixture name)
 
 <game> may also come from $TWMCP_GAME.`;
 
@@ -56,8 +56,11 @@ async function walk(manager: SessionManager, session: GameSession, steps: number
 const manager = new SessionManager();
 
 if (sub === 'probe') {
-  const name = target ?? 'snowman';
-  const file = path.join(HERE, '..', 'test', 'fixtures', 'compiled', `${name}.html`);
+  // Accept a real game (any path, or $TWMCP_GAME) as well as a bare fixture name.
+  const arg = target ?? process.env.TWMCP_GAME ?? 'snowman';
+  const file = requireGame(arg, 'debug probe')
+    ? arg
+    : path.join(HERE, '..', 'test', 'fixtures', 'compiled', `${arg}.html`);
   const session = await manager.open({ source: file, headless: true });
   const script = `(() => {
     const w = window;

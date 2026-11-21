@@ -331,7 +331,7 @@ export class SessionManager {
         }
       }
 
-      session.lastObservation = await this.observe(session);
+      session.lastObservation = await this.waitInteractive(session, opts.waitTimeoutMs ?? 20000);
       this.sessions.set(id, session);
       return session;
     } catch (err) {
@@ -437,6 +437,25 @@ export class SessionManager {
       throw new Error(`page bridge unavailable: ${detail}`);
     }
     session.lastObservation = obs;
+    return obs;
+  }
+
+  /**
+   * Wait for the first thing an agent can actually act on.
+   *
+   * Some games render their shell before the opening passage is playable: SugarCube's
+   * #init-screen ("Loading…") stays up for seconds while the story boots — measured ~4.5s on
+   * [Redacted] Redux — and an observation taken at that moment reports zero choices, which reads
+   * as an ending. Only open_game pays this cost; a passage reached by playing is already rendered
+   * (verified on the same game: choices are there immediately after every choose).
+   */
+  private async waitInteractive(session: GameSession, budgetMs: number): Promise<Observation> {
+    const deadline = Date.now() + Math.min(Math.max(budgetMs, 1000), 10000);
+    let obs = await this.observe(session);
+    while (!obs.choices.length && !obs.inputs.length && !obs.dialog && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 150));
+      obs = await this.observe(session);
+    }
     return obs;
   }
 

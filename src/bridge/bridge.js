@@ -110,6 +110,30 @@
     return null;
   };
 
+  /**
+   * Harlowe's current passage name, read from its own session-restore blob.
+   *
+   * Harlowe 3 keeps Engine/State in module scope, so they are NOT window globals (verified on
+   * Harlowe 3.3.8 and 3.3.9: window.Engine, window.State and window.Harlowe are all undefined),
+   * and <tw-passage> carries no passage name attribute. What it does leave readable is
+   * sessionStorage["Saved Session"]: the trail it reloads a session from. Each entry is either a
+   * bare passage name (string) or a { passage, variables, ... } record, newest last.
+   */
+  const harloweTrailPassage = () => {
+    try {
+      const raw = window.sessionStorage && window.sessionStorage.getItem('Saved Session');
+      if (!raw) return null;
+      const trail = JSON.parse(raw);
+      if (!Array.isArray(trail) || !trail.length) return null;
+      for (let i = trail.length - 1; i >= 0; i--) {
+        const entry = trail[i];
+        if (typeof entry === 'string' && entry) return entry;
+        if (entry && typeof entry === 'object' && typeof entry.passage === 'string' && entry.passage) return entry.passage;
+      }
+    } catch (_) { /* storage disabled or a shape we do not know */ }
+    return null;
+  };
+
   const readPassageName = (fmt) => {
     const g = window;
     try {
@@ -122,6 +146,8 @@
         if (p) return String(p.name || p.title || p);
       }
       if (fmt === 'harlowe') {
+        const trailPassage = harloweTrailPassage();
+        if (trailPassage) return trailPassage;
         if (g.Engine && g.Engine.passage) return String(g.Engine.passage);
         if (g.State && g.State.passage) return String(g.State.passage);
       }
@@ -1020,8 +1046,19 @@
         const moved = E.back();
         return { ok: true, moved: moved !== false, method: 'engine-back' };
       }
-      // Harlowe renders player-facing undo/redo controls inside <tw-sidebar>.
-      const undo = document.querySelector('tw-sidebar .undo, tw-sidebar tw-icon.undo, tw-icon.undo');
+      // Harlowe renders player-facing undo/redo controls inside <tw-sidebar>. Up to 3.1 the icon
+      // carried class="undo"; 3.3.x dropped the class and identifies it by alt/title instead
+      // (verified on 3.3.8 and 3.3.9 — a class-only selector silently lost back() on real games).
+      const sidebars = Array.from(document.querySelectorAll('tw-sidebar, tw-passage > tw-sidebar'));
+      let undo = null;
+      for (const bar of sidebars) {
+        const cands = Array.from(bar.querySelectorAll('tw-icon, .undo'));
+        undo = cands.find((el) => {
+          const marks = [el.getAttribute('title'), el.getAttribute('alt'), el.textContent];
+          return marks.some((m) => m && /undo/i.test(String(m).trim()));
+        }) || null;
+        if (undo) break;
+      }
       if (undo && isElementVisible(undo)) {
         undo.click();
         return { ok: true, moved: true, method: 'harlowe-undo' };
@@ -1060,14 +1097,50 @@
     }
   };
 
+  /**
+   * SugarCube's Config.saves.isAllowed() is a *game* policy, not an engine capability: a passage
+   * tagged "NoSave" (or a scripted rule) makes Save.base64.save() throw and Save.serialize()
+   * return null. Reading it up front turns an opaque engine error into an actionable one.
+   * A policy that throws is treated as "allowed" — the engine still has the final say.
+   */
+  const savingAllowed = (S) => {
+    try {
+      const fn = S && S.Config && S.Config.saves && S.Config.saves.isAllowed;
+      if (typeof fn !== 'function') return true;
+      return !!fn();
+    } catch (_) {
+      return true;
+    }
+  };
+
+  const snapshotDisallowed = (passage) => ({
+    ok: false,
+    error: 'saving-disallowed',
+    message:
+      'The game itself blocks saving on the current passage' + (passage ? ' ("' + passage + '")' : '') +
+      ' (SugarCube Config.saves.isAllowed() — usually a "NoSave" tag). Try again on a normal passage.'
+  });
+
   const snapshot = () => {
     try {
       const S = sugar() || window;
+      const allowed = savingAllowed(S);
+      const passage = readPassageName(detectFormat().name);
       if (S.Save && S.Save.base64 && typeof S.Save.base64.save === 'function') {
-        return { ok: true, data: S.Save.base64.save(), method: 'sugarcube-base64' };
+        if (!allowed) return snapshotDisallowed(passage);
+        const data = S.Save.base64.save();
+        if (typeof data !== 'string' || !data) {
+          return { ok: false, error: 'snapshot-failed', message: 'Save.base64.save() returned no data.' };
+        }
+        return { ok: true, data, method: 'sugarcube-base64' };
       }
       if (S.Save && typeof S.Save.serialize === 'function') {
-        return { ok: true, data: S.Save.serialize(), method: 'sugarcube-serialize' };
+        const data = S.Save.serialize();
+        // SugarCube 2.21–2.36 return null (after popping an alert) when saving is disallowed.
+        if (data === null || data === undefined) return allowed
+          ? { ok: false, error: 'snapshot-failed', message: 'Save.serialize() returned null.' }
+          : snapshotDisallowed(passage);
+        return { ok: true, data: String(data), method: 'sugarcube-serialize' };
       }
       const g = window;
       if (g.engine && g.engine.state && typeof g.engine.state.saveToObject === 'function') {
