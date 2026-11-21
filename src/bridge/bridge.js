@@ -1170,7 +1170,16 @@
         undo.click();
         return { ok: true, moved: true, method: 'harlowe-undo' };
       }
-      return { ok: false, error: 'unsupported', message: 'This story format has no backward navigation API.' };
+      // Distinguish the two cases: a format with no notion of going back, versus a game that
+      // has the control but hides it. Saying "this format has no backward navigation API" on
+      // Harlowe is simply false — Harlowe has one, the game CSS removed it.
+      return {
+        ok: false,
+        error: 'no-back-control',
+        message:
+          'No usable back control is visible on this page. The format may support going back but' +
+          ' this game hides or omits the control (a hidden sidebar is common).'
+      };
     } catch (e) {
       return { ok: false, error: 'back-failed', message: String(e && e.message || e) };
     }
@@ -1194,10 +1203,9 @@
         storyObj.go(String(passageName));
         return { ok: true, method: 'snowman-go' };
       }
-      if (window.Engine && typeof window.Engine.goTo === 'function') {
-        window.Engine.goTo(String(passageName));
-        return { ok: true, method: 'harlowe' };
-      }
+      // No Harlowe branch on purpose: Harlowe 3.3 keeps Engine in module scope, so
+      // window.Engine is undefined and the old check never fired. Keeping it made the docs
+      // claim Harlowe could jump when it cannot.
       return { ok: false, error: 'unsupported' };
     } catch (e) {
       return { ok: false, error: 'goto-failed', message: String(e && e.message || e) };

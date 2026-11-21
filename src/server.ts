@@ -677,7 +677,12 @@ export function buildServer(manager: SessionManager): McpServer {
         const res = await manager.engine(session, { include, paths, limit });
         if (!res.ok) {
           return errResult(res.error ?? 'engine-failed', res.message, {
-            hint: 'No readable engine on this page yet. If the game is still booting, observe() once and retry; Harlowe never exposes one — use observe(include_variables:true) there.'
+            // Tell the two failures apart: no engine reachable at all, versus this particular
+            // include not being supported by a format that otherwise answers fine.
+            hint:
+              include === 'paths'
+                ? 'This format exposes no named variable paths. Harlowe keeps variables in its session trail only — use observe(include_variables:true) or get_variables().'
+                : 'No readable engine on this page yet. If the game is still booting, observe() once and retry.'
           });
         }
         return text(JSON.stringify(res));
