@@ -1263,8 +1263,17 @@ export class SessionManager {
       await this.waitStable(session, 20000);
     }
     session.step = 0;
-    session.journal.push({ step: 0, passage: null, action: seed ? `(restart seed=${seed})` : '(restart)', target: null, at: Date.now() });
-    return { ok: true, observation: await this.resultObservation(session), seeded: !!seed };
+    const observation = await this.resultObservation(session);
+    // Record the restart with the passage it landed on, after the counter reset: logging it
+    // beforehand produced "#0 ? — (restart)" behind a "#2" line, which reads as time running backwards.
+    session.journal.push({
+      step: 0,
+      passage: observation.passage,
+      action: seed ? `(restart seed=${seed})` : '(restart)',
+      target: null,
+      at: Date.now()
+    });
+    return { ok: true, observation, seeded: !!seed };
   }
 
   /**
@@ -1479,6 +1488,10 @@ export class SessionManager {
     const res = await this.bridge<BridgeResult>(session, 'restore', snap.data);
     if (!res.ok) return { ok: false, error: res.error, message: res.message };
     await this.waitStable(session);
+    // Restoring a snapshot moves the story, so it is a step like back/goto/restart. Leaving the
+    // counter alone made two different actions land on the same step (#3 (back), #3 (load:s)),
+    // which read as if one of them had not happened.
+    session.step += 1;
     const observation = await this.resultObservation(session);
     session.journal.push({ step: session.step, passage: observation.passage, action: `(load:${name})`, target: null, at: Date.now() });
     return { ok: true, observation };
