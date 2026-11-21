@@ -1392,8 +1392,20 @@
         return { ok: true, visited: list, count: list.length };
       }
       if (fmt === 'snowman') {
+        // story.history holds numeric passage ids ([1,2,3]), so resolve them through
+        // story.passages; a bare id would tell the agent nothing about where it has been.
         const h = g.story && Array.isArray(g.story.history) ? g.story.history : [];
-        const list = h.map((x) => (x && x.passage ? String(x.passage) : typeof x === 'string' ? x : null)).filter(Boolean);
+        const byId = (id) => {
+          const ps = g.story && g.story.passages;
+          if (!ps) return null;
+          const hit = typeof ps.find === 'function'
+            ? ps.find((p) => p && String(p.id) === String(id))
+            : Array.isArray(ps) ? ps.find((p) => p && String(p.id) === String(id)) : null;
+          return hit && hit.name ? String(hit.name) : null;
+        };
+        const list = h
+          .map((x) => (x && x.passage ? String(x.passage) : typeof x === 'string' ? x : byId(x)))
+          .filter(Boolean);
         return { ok: true, visited: list, count: list.length };
       }
       if (fmt === 'harlowe') {

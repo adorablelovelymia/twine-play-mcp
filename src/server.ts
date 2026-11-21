@@ -100,6 +100,10 @@ function jsonPayload(session: GameSession, obs: Observation, action?: Record<str
     uiTotal: obs.uiTotal ?? obs.ui.length,
     dialog: obs.dialog ? { title: obs.dialog.title, text: obs.dialog.text, buttons: obs.dialog.buttons } : null,
     status: obs.status,
+    // Present only when the caller asked for them, so the payload stays small otherwise.
+    // They used to be dropped silently, which made include_variables:true a lie in json mode.
+    ...(obs.variables != null ? { variables: obs.variables } : {}),
+    ...(obs.loading ? { loading: true } : {}),
     action: action ?? null
   });
 }
@@ -854,7 +858,18 @@ export function buildServer(manager: SessionManager): McpServer {
         const session = manager.resolve(game_id);
         const buf = await manager.screenshot(session, path);
         if (path) return text(`Screenshot saved: ${path} (${buf.length} bytes)`);
-        return { content: [{ type: 'image' as const, data: buf.toString('base64'), mimeType: 'image/png' }] };
+        // A large page is downscaled to JPEG (see SessionManager.screenshot) — say so, so the
+        // agent is not surprised by softer text or a different mimeType.
+        const isPng = buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+        return {
+          content: [
+            {
+              type: 'image' as const,
+              data: buf.toString('base64'),
+              mimeType: isPng ? 'image/png' : 'image/jpeg'
+            }
+          ]
+        };
       } catch (err) {
         return fromError(manager, 'screenshot-failed', err);
       }

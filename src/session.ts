@@ -1177,8 +1177,19 @@ export class SessionManager {
     return { ok: true, waitedMs: Date.now() - t0, observation: await this.resultObservation(session) };
   }
 
+  /**
+   * Viewport screenshot.
+   *
+   * PNG is lossless but unbounded: a text-heavy page can land at 2.2 MB of base64 in one tool
+   * result, while a quiet page is 60 KB — a 35x swing for the same call. When the image is going
+   * to the model (no outPath) and it is large, fall back to JPEG so one screenshot cannot eat a
+   * whole context window. A file on disk always gets the full PNG.
+   */
   async screenshot(session: GameSession, outPath?: string): Promise<Buffer> {
     const buf = await session.page.screenshot({ type: 'png' });
+    if (!outPath && buf.length > 400_000) {
+      return session.page.screenshot({ type: 'jpeg', quality: 70 });
+    }
     if (outPath) {
       const abs = path.resolve(outPath);
       fs.mkdirSync(path.dirname(abs), { recursive: true });
