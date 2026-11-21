@@ -151,6 +151,16 @@ interface BridgeResult {
   [key: string]: unknown;
 }
 
+/**
+ * Did a bridge call fail because the page navigated out from under it?
+ *
+ * Restarting a story reloads or re-initialises the page, which destroys the execution context
+ * that is waiting for the call's return value. That is the restart working, not a failure.
+ */
+function isNavigationTeardown(err: unknown): boolean {
+  return /context was destroyed|navigat|execution context/i.test(String((err as Error)?.message ?? err));
+}
+
 let bridgeSourceCache: string | null = null;
 
 function bridgeSource(): string {
@@ -1228,9 +1238,30 @@ export class SessionManager {
       const seeded = await this.bridge<BridgeResult>(session, 'seed', seed);
       if (seeded.ok) session.seed = seed;
     } else {
-      await this.bridge<BridgeResult>(session, 'restart');
+      // A restart tears the page down one way or another. Some formats have an in-page API
+      // (SugarCube Engine.restart) that schedules a reload, others (Chapbook, Snowman, Harlowe)
+      // only reload. Either way the context can vanish mid-call, so treat "context destroyed"
+      // as "the restart happened" rather than as a failure — that opaque error is what made
+      // restart look broken on all four formats.
+      let res: (BridgeResult & { needsReload?: boolean }) | null = null;
+      try {
+        res = await this.bridge<BridgeResult & { needsReload?: boolean }>(session, 'restart');
+      } catch (err) {
+        if (!isNavigationTeardown(err)) throw err;
+        res = { ok: false, needsReload: true };
+      }
+      if (res?.needsReload) {
+        await session.page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+      }
     }
-    await this.waitStable(session, 20000);
+    // The settle that follows may also lose the context to a reload that is still in flight.
+    try {
+      await this.waitStable(session, 20000);
+    } catch (err) {
+      if (!isNavigationTeardown(err)) throw err;
+      await session.page.waitForLoadState('domcontentloaded', { timeout: 60000 }).catch(() => undefined);
+      await this.waitStable(session, 20000);
+    }
     session.step = 0;
     session.journal.push({ step: 0, passage: null, action: seed ? `(restart seed=${seed})` : '(restart)', target: null, at: Date.now() });
     return { ok: true, observation: await this.resultObservation(session), seeded: !!seed };

@@ -100,11 +100,30 @@
 
   const PASSAGE_SELECTORS = ['#passage', 'tw-passage', '#page article', '#story .passage', '.passage', 'tw-story', '#story'];
 
+  /**
+   * Is this element part of a passage that is animating out?
+   *
+   * Chapbook crossfades between passages: the old one stays in the DOM for ~500ms with a
+   * fade-out class, links and all. Reading it produced "ghost" choices that belonged to the
+   * previous passage, so clicks failed with stale-ref and the (N -> M choices) counts in play()
+   * were nonsense while a transition was in flight.
+   */
+  const isFadingOut = (el) => {
+    try {
+      if (el.closest && el.closest('.fade-out, [data-cb-transition="out"]')) return true;
+      const op = Number(window.getComputedStyle(el).opacity);
+      return op > 0 && op < 0.95 && !!(el.closest && el.closest('article, .passage'));
+    } catch (_) {
+      return false;
+    }
+  };
+
   const getPassageRoot = () => {
     for (const sel of PASSAGE_SELECTORS) {
       const els = Array.from(document.querySelectorAll(sel));
       for (const el of els) {
-        if (isElementVisible(el)) return el;
+        if (!isElementVisible(el) || isFadingOut(el)) continue;
+        return el;
       }
     }
     return null;
@@ -362,6 +381,9 @@
     // 1. Passage-scoped choices.
     for (const sel of CHOICE_SELECTORS) {
       for (const el of scope.querySelectorAll(sel)) {
+        // A passage fading out (Chapbook crossfade) still holds clickable links that belong
+        // to the *previous* passage; collecting them produces ghost choices.
+        if (isFadingOut(el)) continue;
         if (seen.has(el)) continue;
         seen.add(el);
         if (choices.length >= 120) break;
@@ -427,7 +449,7 @@
         '#startCaption button, #startCaption a, #story-caption button, #story-caption a, ' +
         '#startBannerModLoaderGui, #ui-bar-tray button'
     )) {
-      if (seen.has(el) || !isElementVisible(el)) continue;
+      if (seen.has(el) || !isElementVisible(el) || isFadingOut(el)) continue;
       const label = normalize(el.innerText || el.value || el.getAttribute('aria-label') || el.title || '').slice(0, 60);
       if (!label) continue;
       seen.add(el);
@@ -1066,12 +1088,19 @@
     return { ok: true, selector: String(o.selector), text, buttons, inputs };
   };
 
+  /**
+   * Restart the story in-page.
+   *
+   * Formats with an engine restart API are handled here. Everything else is the caller's job:
+   * calling location.reload() from inside the bridge destroys the execution context that is
+   * waiting for this return value, so the caller sees "Execution context was destroyed" and
+   * the restart looks broken. The server reloads the page through Playwright instead.
+   */
   const restart = () => {
     try {
       const E = window.Engine || (sugar() && sugar().Engine);
       if (E && typeof E.restart === 'function') { E.restart(); return { ok: true, method: 'engine' }; }
-      location.reload();
-      return { ok: true, method: 'reload' };
+      return { ok: false, error: 'no-engine-restart', needsReload: true };
     } catch (e) {
       return { ok: false, error: 'restart-failed', message: String(e && e.message || e) };
     }
@@ -1088,6 +1117,35 @@
         const moved = E.back();
         return { ok: true, moved: moved !== false, method: 'engine-back' };
       }
+      // Formats with a back control in the page but no engine API: Snowman renders a real
+      // '← BACK' link, and telling the agent "no backward navigation API" while the button sits
+      // right there is just wrong. Look for the control before giving up.
+      // Be strict: only an explicit back affordance (a short label built around "back", or a
+      // back arrow) qualifies. A passage link that merely mentions the word — "Go back to the
+      // hall" — is a story choice, and clicking it would silently walk the story instead.
+      // Only look in page chrome, never inside the passage: a story link labelled "Back" is a
+      // choice that walks the narrative, and silently clicking it moves the story instead of
+      // undoing it. Snowman puts its real affordance in the footer as "← BACK".
+      const backLink = (() => {
+        const chrome = document.querySelectorAll(
+          'footer a, header a, footer button, header button, [data-cb-footer] a, .passage-footer a, #back-button, [data-cb-back]'
+        );
+        for (const el of chrome) {
+          const text = normalize(el.textContent || '');
+          const title = el.getAttribute('title') || el.getAttribute('aria-label') || '';
+          const short = (text.split('\n')[0] || '').trim();
+          const isBack = /back|undo/i.test(short) || /back|undo/i.test(title);
+          if (!isBack) continue;
+          if (!isElementVisible(el) || isFadingOut(el)) continue;
+          return el;
+        }
+        return null;
+      })();
+      if (backLink) {
+        backLink.click();
+        return { ok: true, moved: true, method: 'dom-back' };
+      }
+
       // Harlowe renders player-facing undo/redo controls inside <tw-sidebar>. Up to 3.1 the icon
       // carried class="undo"; 3.3.x dropped the class and identifies it by alt/title instead
       // (verified on 3.3.8 and 3.3.9 — a class-only selector silently lost back() on real games).
@@ -1295,7 +1353,16 @@
             return Array.isArray(names) ? names.length : null;
           } catch (_) { return null; }
         })();
-        out.storyPassages = e.story && e.story.passages ? Object.keys(e.story.passages).length : null;
+        // Chapbook's story.passages is a FUNCTION returning the passage list, not a map.
+        out.storyPassages = (() => {
+          try {
+            const ps = e.story && e.story.passages;
+            if (!ps) return null;
+            const list = typeof ps === 'function' ? ps() : ps;
+            if (!list) return null;
+            return Array.isArray(list) ? list.length : Object.keys(list).length;
+          } catch (_) { return null; }
+        })();
         return { ok: true, ...out };
       }
       if (fmt === 'snowman') {
