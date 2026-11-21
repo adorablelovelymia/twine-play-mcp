@@ -51,12 +51,13 @@ Then update the support matrix in both READMEs.
 
 | Script | Needs | What it covers |
 | --- | --- | --- |
-| `npm test` | nothing | Build, 4-format fixture checks, tool-surface snapshot + byte budget, doc check |
+| `npm test` | nothing | Build, 4-format fixture checks, tool-surface snapshot + byte budget, runtime output budget, doc check |
 | `npm run smoke` | `TWMCP_GAME` | Full MCP round trip over stdio: open, play, snapshots, downloads, live view |
 | `npm run spike` | `TWMCP_GAME` | Longer single-format play: variables, N steps, back, screenshot |
 | `npm run clarity` | `TWMCP_GAME` | Agent-ergonomics regressions: input pagination, label matching, error shape |
 | `npm run formats` | nothing | Just the fixture checks |
 | `npm run tools` | nothing | Print the tool surface; refresh `test/tools.snapshot.json` |
+| `npm run economy` | nothing | Print what the tools actually return; `--check` fails when output grows past budget |
 | `npm run docs` | nothing | Regenerate the README tool tables |
 | `npm run debug` | varies | Ad-hoc tools — see `npx tsx scripts/debug.ts` for the subcommands |
 | `npm run fixtures` | Tweego in `.tools/` | Rebuild `test/fixtures/compiled/*.html` from the `.twee` sources |
@@ -80,6 +81,29 @@ npx tsx scripts/tools.ts --budget   # fail if the surface or a description grew 
 
 After an intentional change: refresh the snapshot, bump `SURFACE_BUDGET_BYTES` if the new tool is
 worth it, and update `scripts/docs.ts` (it fails on an undocumented tool).
+
+### The runtime output budget
+
+The surface is the small half of the bill. A 20-step run through a real game used to cost
+~100 KB of observations against a 12 KB surface — the tools were cheap and what they *said*
+was expensive. `scripts/economy.ts` measures the other half: it drives the fixtures through a
+real MCP client and asserts a byte ceiling per case.
+
+```bash
+npx tsx scripts/economy.ts            # show the table
+npx tsx scripts/economy.ts --check    # fail when a case grows past its budget
+```
+
+Two rules keep this honest:
+
+- **Every case opens its own session.** Sharing one lets an earlier case play the story
+  forward, so a later case measures an error message instead of the thing it claims to.
+- **Budgets are ceilings, not descriptions.** They were measured once and given headroom;
+  a failure means either the renderer regressed or the budget deserves a deliberate bump.
+
+The renderer does the work those budgets protect: action results stay lean (story variables are
+opt-in), `observe` prints a delta rather than the whole variable tree, a revisited passage
+collapses to a one-line handle, and unchanged status/UI print as `unchanged`.
 
 ## Docs are generated
 

@@ -17,8 +17,15 @@ import { mcpClient, REPO_ROOT } from './_harness.js';
 
 const SNAPSHOT = path.join(REPO_ROOT, 'test', 'tools.snapshot.json');
 
-/** Byte budget for the whole tool surface (schemas + descriptions + names). */
-export const SURFACE_BUDGET_BYTES = 12_500;
+/**
+ * Byte budget for the whole tool surface (schemas + descriptions + names).
+ *
+ * Raised from 12,500 to 14,000 for the two meta-tools: `engine` reads engine state directly
+ * (~160 bytes where an observation costs ~1.5 KB) and `play` collapses N round trips into one
+ * call. Both pay for themselves in output volume many times over — a single saved observation
+ * covers their whole footprint — but the surface still gets a hard ceiling.
+ */
+export const SURFACE_BUDGET_BYTES = 14_000;
 /** Upper bound for a single tool description; longer ones get repeated in every session. */
 export const DESC_BUDGET_BYTES = 320;
 

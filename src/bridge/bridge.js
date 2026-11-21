@@ -119,18 +119,36 @@
    * sessionStorage["Saved Session"]: the trail it reloads a session from. Each entry is either a
    * bare passage name (string) or a { passage, variables, ... } record, newest last.
    */
-  const harloweTrailPassage = () => {
+  const harloweTrail = () => {
     try {
       const raw = window.sessionStorage && window.sessionStorage.getItem('Saved Session');
       if (!raw) return null;
       const trail = JSON.parse(raw);
-      if (!Array.isArray(trail) || !trail.length) return null;
-      for (let i = trail.length - 1; i >= 0; i--) {
-        const entry = trail[i];
-        if (typeof entry === 'string' && entry) return entry;
-        if (entry && typeof entry === 'object' && typeof entry.passage === 'string' && entry.passage) return entry.passage;
-      }
-    } catch (_) { /* storage disabled or a shape we do not know */ }
+      return Array.isArray(trail) && trail.length ? trail : null;
+    } catch (_) {
+      return null; // storage disabled or a shape we do not know
+    }
+  };
+
+  const harloweTrailPassage = () => {
+    const trail = harloweTrail();
+    if (!trail) return null;
+    for (let i = trail.length - 1; i >= 0; i--) {
+      const entry = trail[i];
+      if (typeof entry === 'string' && entry) return entry;
+      if (entry && typeof entry === 'object' && typeof entry.passage === 'string' && entry.passage) return entry.passage;
+    }
+    return null;
+  };
+
+  /** The newest trail entry that carries variables — Harlowe's only readable store. */
+  const harloweTrailEntry = () => {
+    const trail = harloweTrail();
+    if (!trail) return null;
+    for (let i = trail.length - 1; i >= 0; i--) {
+      const entry = trail[i];
+      if (entry && typeof entry === 'object' && entry.variables && typeof entry.variables === 'object') return entry;
+    }
     return null;
   };
 
@@ -470,6 +488,13 @@
         if (S.state && S.state.variables) return tryObj(S.state.variables);
       }
       if (fmt === 'harlowe') {
+        // Harlowe keeps its variable store in module scope, but it writes the whole trail —
+        // variables included — into sessionStorage on every navigation. The newest entry that
+        // carries variables is the live store (verified on 3.3.8/3.3.9: 21 keys).
+        const entry = harloweTrailEntry();
+        if (entry && entry.variables && typeof entry.variables === 'object') {
+          if (Object.keys(entry.variables).length) return tryObj(entry.variables);
+        }
         const st = g.Harlowe && g.Harlowe.API_ACCESS && g.Harlowe.API_ACCESS.STATE;
         if (st && st.variables) return tryObj(st.variables);
         const alt = g.State || (g.Harlowe && g.Harlowe.State);
@@ -628,6 +653,22 @@
     return { ok: true, elapsed: Date.now() - t0, engineState: engineState(), busy: engineBusy() };
   };
 
+  /**
+   * Is the shell up but the story not playable yet?
+   *
+   * SugarCube keeps #init-screen ("Loading…") visible while the story boots — measured ~4.5s on
+   * [Redacted] Redux. Reporting zero choices then reads as an ending, so say what is happening.
+   */
+  const isLoading = () => {
+    try {
+      for (const sel of ['#init-screen', '#init-loading', '.loading', '.loader', '[aria-busy="true"]']) {
+        const el = document.querySelector(sel);
+        if (el && isElementVisible(el)) return true;
+      }
+    } catch (_) { /* ignore */ }
+    return false;
+  };
+
   const observe = (opts) => {
     const o = opts || {};
     const fmtInfo = detectFormat();
@@ -676,7 +717,8 @@
       variables,
       engineState: engineState(),
       hasPassageRoot: !!root,
-      readyState: document.readyState
+      readyState: document.readyState,
+      loading: isLoading()
     };
   };
 
@@ -1205,6 +1247,166 @@
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // Engine introspection
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Read-only adapter over whatever the story format exposes on window.
+   *
+   * SugarCube, Chapbook and Snowman all leave their engine reachable; Harlowe does not (its
+   * Engine/State live in module scope), so it reports unsupported rather than pretending.
+   * This is the difference between "ask the engine one question" and "re-render the page and
+   * regex the answer out of the prose".
+   */
+  const engineSummary = () => {
+    const fmt = detectFormat().name;
+    const g = window;
+    const out = { format: fmt };
+    try {
+      if (fmt === 'sugarcube') {
+        const S = sugar();
+        if (!S || !S.State) return { ok: false, error: 'unsupported', message: 'SugarCube globals are not available yet.' };
+        const vars = S.State.variables || {};
+        out.passage = S.State.passage ?? null;
+        out.turns = S.State.turns ?? null;
+        out.variablesCount = Object.keys(vars).length;
+        out.visitedCount = Array.isArray(S.State.passages) ? S.State.passages.length : null;
+        // Story.passages is a Map in SugarCube 2 (not a plain object).
+        const stories = S.Story && S.Story.passages;
+        out.storyPassages =
+          stories instanceof Map ? stories.size
+            : stories && typeof stories === 'object' ? Object.keys(stories).length
+            : null;
+        out.engineState = S.Engine && typeof S.Engine.state === 'string' ? S.Engine.state : null;
+        out.canSave = savingAllowed(S);
+        return { ok: true, ...out };
+      }
+      if (fmt === 'chapbook') {
+        const e = g.engine;
+        if (!e || !e.state) return { ok: false, error: 'unsupported', message: 'Chapbook globals are not available yet.' };
+        let trail = null;
+        try { trail = e.state.get('trail'); } catch (_) { /* ignore */ }
+        out.passage = Array.isArray(trail) && trail.length ? String(trail[trail.length - 1]) : null;
+        out.visitedCount = Array.isArray(trail) ? trail.length : null;
+        out.variablesCount = (() => {
+          try {
+            const names = typeof e.state.varNames === 'function' ? e.state.varNames() : [];
+            return Array.isArray(names) ? names.length : null;
+          } catch (_) { return null; }
+        })();
+        out.storyPassages = e.story && e.story.passages ? Object.keys(e.story.passages).length : null;
+        return { ok: true, ...out };
+      }
+      if (fmt === 'snowman') {
+        const st = g.story;
+        if (!st) return { ok: false, error: 'unsupported', message: 'Snowman globals are not available yet.' };
+        // On Snowman 2, story.passage is a FUNCTION (so .name would be "value", not the passage);
+        // the current passage object lives on window.passage.
+        out.passage = g.passage && g.passage.name ? String(g.passage.name) : null;
+        out.variablesCount = st.state ? Object.keys(st.state).length : null;
+        out.visitedCount = Array.isArray(st.history) ? st.history.length : null;
+        out.historyTurns = Array.isArray(st.history) ? st.history.length : null;
+        out.storyPassages = st.passages ? Object.keys(st.passages).length : null;
+        return { ok: true, ...out };
+      }
+      if (fmt === 'harlowe') {
+        const trail = harloweTrail() || [];
+        const entry = harloweTrailEntry();
+        out.passage = harloweTrailPassage();
+        out.trailLength = trail.length;
+        out.variablesCount = entry && entry.variables ? Object.keys(entry.variables).length : 0;
+        return { ok: true, ...out, note: 'Harlowe exposes no engine globals; values come from its session trail.' };
+      }
+    } catch (e) {
+      return { ok: false, error: 'engine-failed', message: String(e && e.message || e) };
+    }
+    return { ok: false, error: 'unsupported', message: 'No readable engine for this story format.' };
+  };
+
+  /** Read specific variable paths without shipping the whole tree. */
+  const enginePaths = (opts) => {
+    const o = opts || {};
+    const fmt = detectFormat().name;
+    const S = sugar() || window;
+    let store = null;
+    if (fmt === 'sugarcube' && S.State) store = S.State.variables;
+    else if (fmt === 'chapbook') { try { store = o.__all ? null : null; } catch (_) { /* ignore */ } }
+    if (fmt !== 'sugarcube') {
+      // Every format funnels through readVariables() already; reuse it so shapes stay identical.
+      store = readVariables(fmt);
+    }
+    // Chapbook keeps its store behind engine.state rather than a plain object.
+    // Chapbook's store is not a plain object: names come from varNames(), values from get().
+    if (fmt === 'chapbook' && o.paths && o.paths.length) {
+      try {
+        const st = window.engine && window.engine.state;
+        if (st && typeof st.get === 'function') {
+          const values = {};
+          const missing = [];
+          for (const p of o.paths.map(String).slice(0, 50)) {
+            try {
+              const v = st.get(p);
+              if (v === undefined) missing.push(p); else values[p] = sanitize(v, 0, new Set());
+            } catch (_) { missing.push(p); }
+          }
+          return { ok: true, values, missing };
+        }
+      } catch (_) { /* ignore */ }
+    }
+    if (!store || typeof store !== 'object') {
+      return { ok: false, error: 'unsupported', message: 'Story variables are not readable here.' };
+    }
+    const paths = Array.isArray(o.paths) ? o.paths.map(String).filter(Boolean).slice(0, 50) : [];
+    const values = {};
+    const missing = [];
+    for (const p of paths) {
+      const parts = String(p).replace(/^\$/, '').replace(/^V\./, '').split('.').filter(Boolean);
+      let cur = store;
+      let found = parts.length > 0;
+      for (const part of parts) {
+        if (cur && typeof cur === 'object' && Object.prototype.hasOwnProperty.call(cur, part)) cur = cur[part];
+        else { found = false; break; }
+      }
+      if (found) values[p] = sanitize(cur, 0, new Set());
+      else missing.push(p);
+    }
+    return { ok: true, values, missing };
+  };
+
+  /** Passages the player has actually reached — never the full list (that would spoil). */
+  const engineVisited = () => {
+    const fmt = detectFormat().name;
+    const g = window;
+    try {
+      if (fmt === 'sugarcube') {
+        const S = sugar();
+        const list = S && S.State && Array.isArray(S.State.passages) ? S.State.passages.map(String) : [];
+        return { ok: true, visited: list, count: list.length };
+      }
+      if (fmt === 'chapbook') {
+        const st = g.engine && g.engine.state;
+        let trail = null;
+        try { trail = st && typeof st.get === 'function' ? st.get('trail') : null; } catch (_) { /* ignore */ }
+        const list = Array.isArray(trail) ? trail.map((x) => (typeof x === 'string' ? x : x && x.passage ? String(x.passage) : null)).filter(Boolean) : [];
+        return { ok: true, visited: list, count: list.length };
+      }
+      if (fmt === 'snowman') {
+        const h = g.story && Array.isArray(g.story.history) ? g.story.history : [];
+        const list = h.map((x) => (x && x.passage ? String(x.passage) : typeof x === 'string' ? x : null)).filter(Boolean);
+        return { ok: true, visited: list, count: list.length };
+      }
+      if (fmt === 'harlowe') {
+        const trail = harloweTrail() || [];
+        const list = trail.map((x) => (typeof x === 'string' ? x : x && x.passage ? String(x.passage) : null)).filter(Boolean);
+        return { ok: true, visited: list, count: list.length };
+      }
+    } catch (e) {
+      return { ok: false, error: 'engine-failed', message: String(e && e.message || e) };
+    }
+    return { ok: false, error: 'unsupported', message: 'No visited-passage history for this story format.' };
+  };
+
   const seed = (value) => {
     try {
       const S = sugar() || window;
@@ -1237,6 +1439,9 @@
     restore,
     seed,
     getVariables,
+    engineSummary,
+    enginePaths,
+    engineVisited,
     // `detectFormat` stays internal: nothing outside the bridge needs it.
     meta: storyMeta
   };

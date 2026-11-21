@@ -53,7 +53,11 @@ for (const c of CASES) {
     check(c.name, 'passage name', !!obs.passage, String(obs.passage));
     check(c.name, 'text extracted', obs.text.toLowerCase().includes(c.expectText.toLowerCase()), `${obs.text.length} chars`);
     check(c.name, 'choices found', obs.choices.length >= 2, obs.choices.map((x) => x.label).join(' | '));
-    check(c.name, 'variables readable', c.expectVariables ? !!obs.variables : true, `${obs.variables === null ? 'null' : JSON.stringify(obs.variables).slice(0, 120)}`);
+    // Variables are opt-in now (they were 43% of a SugarCube action result), so the check samples
+    // them explicitly instead of relying on whatever the last action happened to carry.
+    check(c.name, 'action result omits variables', obs.variables === null, `${obs.variables === null ? 'null' : JSON.stringify(obs.variables).slice(0, 80)}`);
+    const withVars = await manager.observe(session, { includeVariables: true });
+    check(c.name, 'variables readable on request', c.expectVariables ? !!withVars.variables : true, `${withVars.variables === null ? 'null' : JSON.stringify(withVars.variables).slice(0, 120)}`);
 
     const res = await manager.choose(session, c.chooseLabel);
     check(c.name, 'choose by label', res.ok, res.ok ? '' : `${res.error} ${res.message ?? ''}`);
@@ -69,7 +73,7 @@ for (const c of CASES) {
     }
     check(c.name, 'passage after back+rechoose', session.lastObservation!.text.toLowerCase().includes(c.expectAfter.toLowerCase()), String(session.lastObservation!.passage));
 
-    const savedVars = beforeBack.variables;
+    const savedVars = (await manager.observe(session, { includeVariables: true })).variables;
     const save = await manager.saveState(session, 'fmt');
     if (c.expectSnapshot) {
       check(c.name, 'snapshot saved', save.ok, save.ok ? `${save.bytes} chars` : `${save.error}`);
@@ -79,7 +83,8 @@ for (const c of CASES) {
       check(c.name, 'snapshot restored', load.ok, load.ok ? '' : `${load.error} ${load.message ?? ''}`);
       const afterText = session.lastObservation!.text.toLowerCase();
       check(c.name, 'restored passage matches', afterText.includes(c.expectAfter.toLowerCase()), afterText.slice(0, 60).replace(/\n/g, ' '));
-      const diff = varDiff(savedVars, session.lastObservation!.variables);
+      const restoredVars = (await manager.observe(session, { includeVariables: true })).variables;
+      const diff = varDiff(savedVars, restoredVars);
       check(c.name, 'restored state matches', diff.length <= 3, diff.slice(0, 3).join('; '));
     } else {
       check(c.name, 'snapshot reports unsupported', !save.ok && save.error === 'unsupported', save.error ?? '');

@@ -63,6 +63,8 @@ export interface Observation {
   engineState: string | null;
   hasPassageRoot: boolean;
   readyState: string;
+  /** True while the shell is up but the story is not playable yet (SugarCube #init-screen). */
+  loading?: boolean;
 }
 
 export interface ConsoleEntry {
@@ -117,6 +119,15 @@ export interface GameSession {
   console: ConsoleEntry[];
   downloads: DownloadRecord[];
   lastObservation: Observation | null;
+  /** Passage name -> fingerprint of the last full render, so a revisit can be a one-line handle. */
+  digests: Map<string, { fingerprint: string; step: number }>;
+  /**
+   * The last variable tree actually read, for diffing.
+   *
+   * Kept apart from lastObservation on purpose: action results are lean (no variables), so
+   * diffing against them would have no baseline and every diff would fall back to a full dump.
+   */
+  lastVariables: unknown;
   snapshots: Map<string, { data: string; at: number }>;
   journal: JournalEntry[];
   step: number;
@@ -309,6 +320,8 @@ export class SessionManager {
       console: [],
       downloads: [],
       lastObservation: null,
+      digests: new Map(),
+      lastVariables: null,
       snapshots: new Map(),
       journal: [],
       step: 0,
@@ -423,7 +436,10 @@ export class SessionManager {
     } = {}
   ): Promise<Observation> {
     const obs = await this.bridge<Observation & BridgeResult>(session, 'observe', {
-      includeVariables: opts.includeVariables ?? true,
+      // Story variables are opt-in everywhere: a SugarCube game can carry 300+ keys (The
+      // Hundredth Floor: 302, ~7.6 KB), and every action used to re-send that tree. Callers that
+      // want them ask explicitly, and the renderer prints a diff rather than the whole tree.
+      includeVariables: opts.includeVariables ?? false,
       includeStatus: opts.includeStatus ?? true,
       maxTextChars: opts.maxTextChars ?? 12000,
       inputsOffset: opts.inputsOffset ?? 0,
@@ -436,8 +452,14 @@ export class SessionManager {
       const detail = (obs as BridgeResult | undefined)?.message ?? (obs as BridgeResult | undefined)?.error ?? 'no result';
       throw new Error(`page bridge unavailable: ${detail}`);
     }
+    if (obs.variables != null) session.lastVariables = obs.variables;
     session.lastObservation = obs;
     return obs;
+  }
+
+  /** An observation for an action result: lean by default, since the action is the news. */
+  private resultObservation(session: GameSession, opts: { includeVariables?: boolean } = {}): Promise<Observation> {
+    return this.observe(session, { includeVariables: opts.includeVariables ?? false });
   }
 
   /**
@@ -474,10 +496,10 @@ export class SessionManager {
       const idx = Math.trunc(choice);
       picked = idx >= 1 && idx <= choices.length ? choices[idx - 1] : undefined;
       if (!picked) {
-        return { ok: false, error: 'bad-index', message: `Choice ${idx} is out of range 1..${choices.length}.`, observation: await this.observe(session) };
+        return { ok: false, error: 'bad-index', message: `Choice ${idx} is out of range 1..${choices.length}.`, observation: await this.resultObservation(session) };
       }
       if (picked.disabled) {
-        return { ok: false, error: 'choice-disabled', message: `Choice ${idx} ("${picked.label}") is disabled.`, observation: await this.observe(session) };
+        return { ok: false, error: 'choice-disabled', message: `Choice ${idx} ("${picked.label}") is disabled.`, observation: await this.resultObservation(session) };
       }
     } else {
       const needle = normalizeLabel(choice);
@@ -489,7 +511,7 @@ export class SessionManager {
           ok: false,
           error: 'no-such-choice',
           message: `No visible choice matches "${choice}".`,
-          observation: await this.observe(session)
+          observation: await this.resultObservation(session)
         };
       }
       if (partial.length > 1 && !exact.length) {
@@ -497,7 +519,7 @@ export class SessionManager {
           ok: false,
           error: 'ambiguous-choice',
           message: `"${choice}" matches ${partial.length} choices; use a number or a longer label.`,
-          observation: await this.observe(session)
+          observation: await this.resultObservation(session)
         };
       }
       picked = partial[0];
@@ -509,7 +531,7 @@ export class SessionManager {
         ok: false,
         error: 'external-link-blocked',
         message: `"${picked.label}" leaves the game (${picked.href ?? 'external URL'}). Pass allow_external=true if you really want to follow it.`,
-        observation: await this.observe(session)
+        observation: await this.resultObservation(session)
       };
     }
     if (expected && !normalizeLabel(picked.label).includes(normalizeLabel(expected))) {
@@ -517,7 +539,7 @@ export class SessionManager {
         ok: false,
         error: 'expectation-failed',
         message: `Choice ${picked.ref} is "${picked.label}", expected to contain "${expected}".`,
-        observation: await this.observe(session)
+        observation: await this.resultObservation(session)
       };
     }
 
@@ -538,7 +560,7 @@ export class SessionManager {
         }
       }
       if (attempt === 0) {
-        const fresh = await this.observe(session);
+        const fresh = await this.resultObservation(session);
         const needle = normalizeLabel(picked.label);
         const again =
           fresh.choices.find((c) => !c.disabled && normalizeLabel(c.label) === needle) ??
@@ -556,12 +578,12 @@ export class SessionManager {
       }
     }
     if (!method) {
-      return { ok: false, error: 'click-failed', message: `Could not click "${picked.label}".`, observation: await this.observe(session) };
+      return { ok: false, error: 'click-failed', message: `Could not click "${picked.label}".`, observation: await this.resultObservation(session) };
     }
 
     await this.waitStable(session);
     session.step += 1;
-    const observation = await this.observe(session);
+    const observation = await this.resultObservation(session);
     session.journal.push({
       step: session.step,
       passage: observation.passage,
@@ -581,7 +603,7 @@ export class SessionManager {
     const locator = session.page.locator(selector);
     const count = await locator.count();
     if (count === 0) {
-      return { ok: false, error: 'stale-ref', message: `Ref ${ref} is gone; call observe again.`, observation: await this.observe(session) };
+      return { ok: false, error: 'stale-ref', message: `Ref ${ref} is gone; call observe again.`, observation: await this.resultObservation(session) };
     }
     const tag = await locator.first().evaluate((el) => el.tagName.toLowerCase()).catch(() => '');
     const inputType = await locator.first().getAttribute('type').catch(() => null);
@@ -601,10 +623,10 @@ export class SessionManager {
       }
     } catch {
       const res = await this.bridge<BridgeResult>(session, 'fillRef', { ref, value });
-      if (!res.ok) return { ok: false, error: res.error ?? 'interact-failed', message: res.message, observation: await this.observe(session) };
+      if (!res.ok) return { ok: false, error: res.error ?? 'interact-failed', message: res.message, observation: await this.resultObservation(session) };
     }
     await this.waitStable(session);
-    const observation = await this.observe(session);
+    const observation = await this.resultObservation(session);
     return { ok: true, observation };
   }
 
@@ -615,7 +637,7 @@ export class SessionManager {
     }
     await session.page.keyboard.press(key);
     await this.waitStable(session);
-    const observation = await this.observe(session);
+    const observation = await this.resultObservation(session);
     return { ok: true, observation };
   }
 
@@ -685,29 +707,29 @@ export class SessionManager {
       const clicked = await this.clickRefWithFallback(session, viaBridge.ref);
       await this.waitStable(session);
       if (!clicked.ok) {
-        return { ok: false, error: 'click-failed', message: clicked.message, observation: await this.observe(session) };
+        return { ok: false, error: 'click-failed', message: clicked.message, observation: await this.resultObservation(session) };
       }
       return {
         ok: true,
         label: viaBridge.label ? `${viaBridge.label} [${clicked.method}]` : clicked.method,
         matches: viaBridge.matches,
         alternatives: viaBridge.alternatives,
-        observation: await this.observe(session)
+        observation: await this.resultObservation(session)
       };
     }
 
     // Fallback: resolve inside child frames via their own injected bridge.
     const hit = await this.resolveAcrossFrames(session, target);
     if (!hit) {
-      return { ok: false, error: viaBridge.error ?? 'no-match', message: viaBridge.message ?? 'No element matched in any frame.', observation: await this.observe(session) };
+      return { ok: false, error: viaBridge.error ?? 'no-match', message: viaBridge.message ?? 'No element matched in any frame.', observation: await this.resultObservation(session) };
     }
     const clicked = await this.clickRefInFrame(hit.frame, hit.ref);
     if (!clicked.ok) {
-      return { ok: false, error: 'click-failed', message: clicked.message, observation: await this.observe(session) };
+      return { ok: false, error: 'click-failed', message: clicked.message, observation: await this.resultObservation(session) };
     }
     await this.waitStable(session);
     const frameNote = hit.frame === session.page.mainFrame() ? '' : ' [iframe]';
-    return { ok: true, label: `${hit.label}${frameNote} [${clicked.method}]`, matches: hit.matches, alternatives: hit.alternatives, observation: await this.observe(session) };
+    return { ok: true, label: `${hit.label}${frameNote} [${clicked.method}]`, matches: hit.matches, alternatives: hit.alternatives, observation: await this.resultObservation(session) };
   }
 
   /** Click a data-twmcp-ref inside a specific frame (Playwright first, DOM click fallback). */
@@ -751,7 +773,7 @@ export class SessionManager {
       if (chooser) {
         await chooser.setFiles(filePath);
         await this.waitStable(session);
-        return { ok: true, observation: await this.observe(session) };
+        return { ok: true, observation: await this.resultObservation(session) };
       }
       // No native picker appeared — the click likely revealed a hidden <input type=file>; fall through.
     }
@@ -773,7 +795,7 @@ export class SessionManager {
       try {
         await locators.nth(target).setInputFiles(filePath);
         await this.waitStable(session);
-        return { ok: true, observation: await this.observe(session) };
+        return { ok: true, observation: await this.resultObservation(session) };
       } catch (err) {
         lastErr = String((err as Error)?.message ?? err);
       }
@@ -1010,7 +1032,7 @@ export class SessionManager {
         target: dest,
         at: Date.now()
       });
-      return { ok: true, path: dest, source: sourcePath, filename, bytes, copied, overwrote, observation: await this.observe(session) };
+      return { ok: true, path: dest, source: sourcePath, filename, bytes, copied, overwrote, observation: await this.resultObservation(session) };
     } catch (err) {
       return { ok: false, error: 'save-failed', message: String((err as Error)?.message ?? err) };
     }
@@ -1145,14 +1167,14 @@ export class SessionManager {
           { timeout }
         );
       } catch {
-        return { ok: true, waitedMs: Date.now() - t0, matched: false, observation: await this.observe(session) };
+        return { ok: true, waitedMs: Date.now() - t0, matched: false, observation: await this.resultObservation(session) };
       }
       await this.waitStable(session);
-      return { ok: true, waitedMs: Date.now() - t0, matched: true, observation: await this.observe(session) };
+      return { ok: true, waitedMs: Date.now() - t0, matched: true, observation: await this.resultObservation(session) };
     }
     if (opts.ms) await new Promise((r) => setTimeout(r, Math.min(opts.ms!, timeout)));
     await this.waitStable(session);
-    return { ok: true, waitedMs: Date.now() - t0, observation: await this.observe(session) };
+    return { ok: true, waitedMs: Date.now() - t0, observation: await this.resultObservation(session) };
   }
 
   async screenshot(session: GameSession, outPath?: string): Promise<Buffer> {
@@ -1170,7 +1192,7 @@ export class SessionManager {
     if (!res.ok) return { ok: false, error: res.error, message: res.message };
     await this.waitStable(session);
     session.step += 1;
-    const observation = await this.observe(session);
+    const observation = await this.resultObservation(session);
     session.journal.push({ step: session.step, passage: observation.passage, action: '(back)', target: null, at: Date.now() });
     return { ok: true, observation };
   }
@@ -1185,7 +1207,149 @@ export class SessionManager {
     await this.waitStable(session, 20000);
     session.step = 0;
     session.journal.push({ step: 0, passage: null, action: seed ? `(restart seed=${seed})` : '(restart)', target: null, at: Date.now() });
-    return { ok: true, observation: await this.observe(session), seeded: !!seed };
+    return { ok: true, observation: await this.resultObservation(session), seeded: !!seed };
+  }
+
+  /**
+   * Run a batch of actions, reporting one compact line per step.
+   *
+   * A trial run of six steps costs six full observations (a Hundredth Floor session: 20.7 KB).
+   * The same run through playSteps is a short journal plus the final observation (~1 KB),
+   * because the intermediate states are summarised rather than rendered.
+   *
+   * Stops at the first failure — guessing after a failed click is how a run goes off the rails —
+   * and reports the step that broke plus what the agent can act on.
+   */
+  async playSteps(
+    session: GameSession,
+    steps: Array<string | number>,
+    opts: { until?: string; maxSteps?: number } = {}
+  ): Promise<{
+    ok: boolean;
+    error?: string;
+    message?: string;
+    ran?: number;
+    stoppedBy?: string;
+    log?: string[];
+    failedStep?: string;
+    observation?: Observation;
+  }> {
+    const limit = Math.min(Math.max(opts.maxSteps ?? 20, 1), 100);
+    const queue = steps.slice(0, limit);
+    const log: string[] = [];
+    let ran = 0;
+    let stoppedBy: string | undefined;
+
+    for (const raw of queue) {
+      const token = String(raw).trim();
+      if (!token) continue;
+      if (token.startsWith('#')) {
+        log.push(`#${ran + 1} (comment) ${token.replace(/^#+\s*/, '')}`);
+        continue;
+      }
+
+      const before = session.lastObservation;
+      const beforeChoices = before?.choices.length ?? 0;
+
+      // Reaching an ending is a normal stop, not a failure: there is simply nothing left to
+      // click. Reporting it as an error made a finished run look broken.
+      const actionable = (session.lastObservation?.choices ?? []).some((c) => !c.disabled && !c.external);
+      const isWait = /^wait\s+/i.test(token) || token.startsWith('#');
+      if (!actionable && !isWait) {
+        stoppedBy = `no further choices (ending?) at step ${ran + 1}`;
+        return {
+          ok: true,
+          ran,
+          stoppedBy,
+          log: [...log, `#${ran + 1} stopped: nothing left to click`],
+          observation: session.lastObservation ?? (await this.resultObservation(session))
+        };
+      }
+
+      let res: { ok: boolean; error?: string; message?: string; observation?: Observation } | null = null;
+
+      const waitMatch = /^wait\s+(\d+)$/i.exec(token);
+      if (waitMatch) {
+        res = await this.wait(session, { ms: Number(waitMatch[1]) ?? 500 });
+      } else if (/^back$/i.test(token)) {
+        res = await this.back(session);
+      } else if (/^restart$/i.test(token)) {
+        res = await this.restart(session);
+      } else if (/^goto\s+/i.test(token)) {
+        res = await this.goTo(session, token.replace(/^goto\s+/i, '').trim());
+      } else if (/^click\s+/i.test(token)) {
+        const r = await this.clickUi(session, { text: token.replace(/^click\s+/i, '').trim() });
+        res = { ok: r.ok, error: r.error, message: r.message, observation: r.observation };
+      } else if (/^fill\s+/i.test(token)) {
+        const m = /^fill\s+(\S+)\s*=\s*([\s\S]*)$/i.exec(token);
+        if (!m) res = { ok: false, error: 'bad-step', message: `Cannot parse "${token}". Use: fill <ref> = <value>` };
+        else {
+          const r = await this.interact(session, m[1]!, m[2] ?? '');
+          res = { ok: r.ok, error: r.error, message: r.message, observation: r.observation };
+        }
+      } else {
+        const choiceArg: number | string = /^\d+$/.test(token) ? Number(token) : token;
+        res = await this.choose(session, choiceArg);
+      }
+
+      if (!res || !res.ok) {
+        return {
+          ok: false,
+          error: res?.error ?? 'play-step-failed',
+          message: res?.message,
+          ran,
+          stoppedBy,
+          log,
+          failedStep: token,
+          observation: res?.observation ?? (await this.resultObservation(session))
+        };
+      }
+
+      ran++;
+      const after = res.observation ?? (await this.resultObservation(session));
+      const delta =
+        (after.choices.length ?? 0) === beforeChoices
+          ? `${after.choices.length} choices`
+          : `${beforeChoices} -> ${after.choices.length} choices`;
+      const target = after.passage ? ` — ${after.passage}` : '';
+      log.push(`#${ran} "${token.slice(0, 60)}"${target} (${delta})`);
+
+      if (opts.until && after.text && after.text.includes(opts.until)) {
+        stoppedBy = `until matched "${opts.until}"`;
+        return { ok: true, ran, stoppedBy, log, observation: after };
+      }
+    }
+
+    return {
+      ok: true,
+      ran,
+      stoppedBy: ran < queue.length ? 'queue exhausted' : undefined,
+      log,
+      observation: await this.resultObservation(session)
+    };
+  }
+
+  /**
+   * Ask the story engine directly instead of re-rendering the page.
+   *
+   * A full observation of The Hundredth Floor is ~1.5 KB of rendered text; the same facts
+   * ("which passage, how many turns, 302 variables, 5 choices") are ~160 bytes through the
+   * engine adapter. Formats with no reachable engine (Harlowe) report unsupported.
+   */
+  async engine(
+    session: GameSession,
+    opts: { include?: 'summary' | 'paths' | 'visited'; paths?: string[] } = {}
+  ): Promise<{ ok: boolean; error?: string; message?: string; [key: string]: unknown }> {
+    const include = opts.include ?? 'summary';
+    if (include === 'paths') {
+      return this.bridge<{ ok: boolean; error?: string; message?: string }>(session, 'enginePaths', {
+        paths: opts.paths ?? []
+      });
+    }
+    if (include === 'visited') {
+      return this.bridge<{ ok: boolean; error?: string; message?: string }>(session, 'engineVisited');
+    }
+    return this.bridge<{ ok: boolean; error?: string; message?: string }>(session, 'engineSummary');
   }
 
   /** List the in-session snapshots, newest first. */
@@ -1205,7 +1369,7 @@ export class SessionManager {
     if (!res.ok) return { ok: false, error: res.error ?? 'goto-failed', message: res.message };
     await this.waitStable(session);
     session.step += 1;
-    const observation = await this.observe(session);
+    const observation = await this.resultObservation(session);
     session.journal.push({ step: session.step, passage: observation.passage, action: `(goto:${passage})`, target: passage, at: Date.now() });
     return { ok: true, observation };
   }
@@ -1226,7 +1390,7 @@ export class SessionManager {
     const res = await this.bridge<BridgeResult>(session, 'restore', snap.data);
     if (!res.ok) return { ok: false, error: res.error, message: res.message };
     await this.waitStable(session);
-    const observation = await this.observe(session);
+    const observation = await this.resultObservation(session);
     session.journal.push({ step: session.step, passage: observation.passage, action: `(load:${name})`, target: null, at: Date.now() });
     return { ok: true, observation };
   }

@@ -120,6 +120,7 @@ console + journal). Types with one knob fold into `action:` / `kind:` parameters
 | `click_ui` | Click sidebar buttons and menus by ref, CSS selector or visible text. |
 | `interact` | Fill an input/select/checkbox by ref, or press a key. |
 | `navigate` | `back` one passage, `restart` the story, or `goto` a named passage. |
+| `play` | Run several actions in one call: one compact log plus the final observation instead of a full observation per step. Tokens: `3`, `"label"`, `wait 800`, `back`, `goto Hall`, `click SAVES`, `fill i1 = hi`, `# note`. Stops at the first failure. |
 
 **Inspect**
 
@@ -127,6 +128,7 @@ console + journal). Types with one knob fold into `action:` / `kind:` parameters
 | --- | --- |
 | `find_ui` | Find controls by text or input name; inspect a DOM subtree or discover overlay panels. |
 | `get_variables` | Read SugarCube `State.variables` by dot path, or a shallow key summary. |
+| `engine` | Ask the story engine directly: passage, turns, variable count, visited passages, or named variable paths — ~160 bytes where an observation costs ~1.5 KB. SugarCube / Chapbook / Snowman. |
 | `get_logs` | Console errors/HTTP failures and the play journal. |
 | `screenshot` | PNG of the viewport — canvas games and visual QA. |
 | `live_view` | Let the user watch the real page in their browser (~1 fps). |
@@ -162,7 +164,7 @@ check, never a stream. The server ships this policy in its MCP `instructions` fi
 | Format | Detect | Text / choices | `get_variables` | Passage name | `navigate(back)` | `snapshot` |
 | --- | --- | --- | --- | --- | --- | --- |
 | **SugarCube 2.21+** | ✅ | ✅ | ✅ `State.variables` | ✅ | ✅ `Engine.backward` | ✅ `Save.base64` / `Save.deserialize` (respects `Config.saves.isAllowed`) |
-| **Harlowe 3** | ✅ | ✅ | — (engine internals are private) | ✅ `Saved Session` trail | ✅ sidebar undo | — |
+| **Harlowe 3** | ✅ | ✅ | ✅ `Saved Session` trail (first passage only) | ✅ `Saved Session` trail | ✅ sidebar undo | — |
 | **Snowman 2** | ✅ | ✅ | — (use `observe(include_variables:true)`) | ✅ | — | ✅ state JSON |
 | **Chapbook 1** | ✅ | ✅ | — (use `observe(include_variables:true)`) | ✅ `trail` | — | ✅ `restoreFromObject` |
 | **Unknown HTML** | generic | ✅ DOM heuristics | — | — | — | — |
@@ -174,6 +176,26 @@ check, never a stream. The server ships this policy in its MCP `instructions` fi
 `get_variables`' dot-path lookup is SugarCube-specific. Everything degrades gracefully: an unknown
 format still plays through the generic DOM path, and format-specific tools report `unsupported`
 instead of failing.
+
+`engine` reads state straight from the story engine — passage, turns, variable count, visited
+passages, named variable paths — for SugarCube, Chapbook and Snowman. Harlowe keeps its engine in
+module scope and reports `unsupported` there; `observe(include_variables:true)` still reads its
+session trail.
+
+## Token economy
+
+What the tools *say* costs far more than the tools themselves, so the output is budgeted the same
+way the surface is (`npm run economy`):
+
+- **Story variables are opt-in.** An action result no longer carries them; ask with
+  `observe(include_variables:true)`. On a game with 302 variables that alone was 43% of a click.
+- **Variables print as a diff.** `Variables Δ (1): coins: 7 -> 12` instead of the whole tree —
+  which also means the one key that changed is no longer buried by the 2000-char cap.
+- **A revisited passage is a handle.** Twine re-renders PassageHeader/Footer on every passage, so
+  going back to a passage you have seen prints `(text unchanged since step 3 — cached)`.
+- **Unchanged status and sidebar collapse** to `Status: unchanged` / `UI: unchanged (6 controls)`.
+- **`engine` answers in ~160 bytes** where a full observation costs ~1.5 KB.
+- **`play` runs a batch** of actions and returns one log plus the final observation.
 
 ## Troubleshooting
 

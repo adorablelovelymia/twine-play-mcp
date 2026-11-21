@@ -107,10 +107,19 @@ function jsonPayload(session: GameSession, obs: Observation, action?: Record<str
 function observationResult(
   session: GameSession,
   obs: Observation,
-  opts: { format?: 'text' | 'json'; prefix?: string; sinceLast?: boolean; previous?: Observation | null; action?: Record<string, unknown> } = {}
+  opts: {
+    format?: 'text' | 'json';
+    prefix?: string;
+    sinceLast?: boolean;
+    previous?: Observation | null;
+    action?: Record<string, unknown>;
+    variablesMode?: 'diff' | 'full';
+    /** The variable tree to diff against — captured *before* this observation was taken. */
+    previousVariables?: unknown;
+  } = {}
 ): TextResult {
   if (opts.format === 'json') return text(jsonPayload(session, obs, opts.action));
-  const body = observationText(session, obs, opts.sinceLast ?? false, opts.previous ?? null);
+  const body = observationText(session, obs, opts.sinceLast ?? false, opts.previous ?? null, opts.variablesMode ?? 'diff', opts.previousVariables);
   return text((opts.prefix ? opts.prefix + '\n\n' : '') + body);
 }
 
@@ -134,12 +143,25 @@ function consoleErrors(session: GameSession): number {
   return session.console.filter((c) => c.type !== 'warning').length;
 }
 
-function observationText(session: GameSession, obs: Observation, sinceLast: boolean, previous: Observation | null): string {
+function observationText(
+  session: GameSession,
+  obs: Observation,
+  sinceLast: boolean,
+  previous: Observation | null,
+  variablesMode: 'diff' | 'full' = 'diff',
+  previousVariables?: unknown
+): string {
   return renderObservation(obs, {
     step: session.step,
     consoleCount: consoleErrors(session),
     sinceLast,
-    previous
+    previous,
+    digest: session.digests,
+    variablesMode,
+    // Diff against the last tree this session read *before* this observation, not against
+    // a lean action result and not against itself.
+    previousVariables,
+    forceFullText: !sinceLast
   });
 }
 
@@ -201,17 +223,18 @@ export function buildServer(manager: SessionManager): McpServer {
         'Read the current passage: text, choices, inputs, dialog, status. Pass for_text or wait_ms to wait first — timed passages need no second call. Inputs are paginated in windows of 40.',
       inputSchema: {
         game_id: gameIdParam,
-        since_last: z.boolean().optional().describe('Return just a "no change" note when nothing changed (default true; ignored for json).'),
-        for_text: z.string().optional().describe('Wait until this text appears anywhere on the page, then observe.'),
-        wait_ms: z.number().int().min(0).max(120000).optional().describe('Wait this long before observing (also the timeout for for_text, default 15000).'),
+        since_last: z.boolean().optional().describe('Only a "no change" note when unchanged (default true; json ignores).'),
+        for_text: z.string().optional().describe('Wait until this text appears, then observe.'),
+        wait_ms: z.number().int().min(0).max(120000).optional().describe('Wait this long first (also for_text timeout, default 15000).'),
         include_variables: z.boolean().optional().describe('Embed story variables (default false).'),
-        max_text_chars: z.number().int().min(200).max(100000).optional().describe('Cap passage text length (default 12000).'),
-        inputs_offset: z.number().int().min(0).max(1000).optional().describe('Skip this many inputs before listing (default 0).'),
-        inputs_limit: z.number().int().min(1).max(500).optional().describe('How many inputs to list (default 40).'),
+        variables: z.enum(['diff', 'full']).optional().describe('"diff" (default) prints only changes; "full" dumps the tree.'),
+        max_text_chars: z.number().int().min(200).max(100000).optional().describe('Cap passage text (default 12000).'),
+        inputs_offset: z.number().int().min(0).max(1000).optional().describe('Skip this many inputs (default 0).'),
+        inputs_limit: z.number().int().min(1).max(500).optional().describe('Inputs to list (default 40).'),
         format: formatParam
       }
     },
-    async ({ game_id, since_last, for_text, wait_ms, include_variables, max_text_chars, inputs_offset, inputs_limit, format }) => {
+    async ({ game_id, since_last, for_text, wait_ms, include_variables, variables, max_text_chars, inputs_offset, inputs_limit, format }) => {
       try {
         const session = manager.resolve(game_id);
         const previous = session.lastObservation;
@@ -224,6 +247,8 @@ export function buildServer(manager: SessionManager): McpServer {
             : `Waited ${res.waitedMs}ms.`;
           return observationResult(session, res.observation ?? (await manager.observe(session)), { format, prefix: note });
         }
+        // Capture the diff baseline before observing: manager.observe() updates it.
+        const previousVariables = session.lastVariables;
         const obs = await manager.observe(session, {
           includeVariables: include_variables ?? false,
           includeStatus: true,
@@ -231,7 +256,13 @@ export function buildServer(manager: SessionManager): McpServer {
           inputsOffset: inputs_offset ?? 0,
           inputsLimit: inputs_limit ?? 40
         });
-        return observationResult(session, obs, { format, sinceLast: since_last ?? true, previous });
+        return observationResult(session, obs, {
+          format,
+          sinceLast: since_last ?? true,
+          previous,
+          variablesMode: variables ?? 'diff',
+          previousVariables
+        });
       } catch (err) {
         return fromError(manager, 'observe-failed', err);
       }
@@ -464,13 +495,13 @@ export function buildServer(manager: SessionManager): McpServer {
         'Find visible controls (buttons, links, labels, inputs) by text and/or input name; returns refs for click_ui/interact. Pass selector to inspect one DOM subtree, or discover:true to list overlay panels (mod GUIs).',
       inputSchema: {
         game_id: gameIdParam,
-        text: z.string().optional().describe('Label text to search for (case-insensitive, partial by default).'),
-        exact: z.boolean().optional().describe('Require an exact label match (default false).'),
-        kind: z.string().optional().describe('Filter by kind: button, link, label, input, radio, checkbox, select, textarea.'),
+        text: z.string().optional().describe('Label text to search (case-insensitive, partial).'),
+        exact: z.boolean().optional().describe('Require an exact label match.'),
+        kind: z.string().optional().describe('Filter: button, link, label, input, radio, checkbox, select, textarea.'),
         name: z.string().optional().describe('Filter by input name attribute (exact).'),
-        selector: z.string().optional().describe('Inspect this DOM subtree instead of searching by text.'),
-        discover: z.boolean().optional().describe('Without text/name/selector: list overlay panels that contain buttons or file inputs.'),
-        limit: z.number().int().min(1).max(100).optional().describe('Max matches to return (default 20).')
+        selector: z.string().optional().describe('Inspect this DOM subtree instead of text search.'),
+        discover: z.boolean().optional().describe('List overlay panels with buttons or file inputs.'),
+        limit: z.number().int().min(1).max(100).optional().describe('Max matches (default 20).')
       }
     },
     async ({ game_id, text: q, exact, kind, name, selector, discover, limit }) => {
@@ -563,6 +594,80 @@ export function buildServer(manager: SessionManager): McpServer {
         return text(JSON.stringify(res));
       } catch (err) {
         return fromError(manager, 'variables-failed', err);
+      }
+    }
+  );
+
+  server.registerTool(
+    'play',
+    {
+      title: 'Run a batch of actions',
+      description:
+        'Run several actions in one call and get one compact log plus the final observation, instead of a full observation per step. Tokens: 3 or "label" (choose), "wait 800", "back", "restart", "goto <passage>", "click <text>", "fill <ref> = <value>", "# note". Stops at the first failure.',
+      inputSchema: {
+        game_id: gameIdParam,
+        steps: z
+          .array(z.union([z.string(), z.number()]))
+          .min(1)
+          .max(100)
+          .describe('Actions in order: 3 / "Label" / "wait 800" / "back" / "goto Hall" / "click SAVES" / "# note".'),
+        until: z.string().optional().describe('Stop early once this text appears in the passage.'),
+        max_steps: z.number().int().min(1).max(100).optional().describe('Cap how many steps run (default 20).'),
+        format: formatParam
+      }
+    },
+    async ({ game_id, steps, until, max_steps, format }) => {
+      try {
+        const session = manager.resolve(game_id);
+        const res = await manager.playSteps(session, steps, { until, maxSteps: max_steps });
+        const body = res.log?.length ? res.log.join('\n') : '(no steps ran)';
+        if (!res.ok) {
+          return errResult(res.error ?? 'play-failed', res.message, {
+            hint: `Stopped at step ${(res.ran ?? 0) + 1}: ${res.failedStep ?? '?'}. Nothing after it was run.`,
+            choices: session.lastObservation?.choices,
+            passage: session.lastObservation?.passage ?? null
+          });
+        }
+        const head =
+          `Ran ${res.ran} step${res.ran === 1 ? '' : 's'}` + (res.stoppedBy ? ` (stopped: ${res.stoppedBy})` : '');
+        return observationResult(session, res.observation!, { format, prefix: `${head}\n${body}` });
+      } catch (err) {
+        return fromError(manager, 'play-failed', err);
+      }
+    }
+  );
+
+  server.registerTool(
+    'engine',
+    {
+      title: 'Ask the story engine directly',
+      description:
+        'Read engine state without re-rendering the page: passage, turns, variable count, visited passages, or specific variable paths. ~160 bytes where an observation costs ~1.5 KB. SugarCube, Chapbook and Snowman; Harlowe reports unsupported.',
+      inputSchema: {
+        game_id: gameIdParam,
+        include: z
+          .enum(['summary', 'paths', 'visited'])
+          .optional()
+          .describe('summary (default): passage/turns/counts. paths: read the paths you name. visited: passages reached so far.'),
+        paths: z
+          .array(z.string())
+          .max(50)
+          .optional()
+          .describe('With include:"paths": dot paths like "player.hp" or "coins".')
+      }
+    },
+    async ({ game_id, include, paths }) => {
+      try {
+        const session = manager.resolve(game_id);
+        const res = await manager.engine(session, { include, paths });
+        if (!res.ok) {
+          return errResult(res.error ?? 'engine-failed', res.message, {
+            hint: 'Harlowe keeps its engine private. Use observe() there; observe(include_variables:true) still reads its session trail.'
+          });
+        }
+        return text(JSON.stringify(res));
+      } catch (err) {
+        return fromError(manager, 'engine-failed', err);
       }
     }
   );
@@ -664,13 +769,13 @@ export function buildServer(manager: SessionManager): McpServer {
       inputSchema: {
         game_id: gameIdParam,
         action: z.enum(['list', 'save', 'newest']).describe('list the folder, save a captured file, or take the newest one.'),
-        trigger: z.string().optional().describe('For action:"save": click this first — a ref, a CSS selector, or visible text.'),
+        trigger: z.string().optional().describe('For save: click this first — ref, selector, or text.'),
         name: z.string().optional().describe('Captured file name (exact, suffix, or unique substring).'),
-        index: z.number().int().min(1).max(200).optional().describe('1-based index from action:"list" (newest first).'),
-        dest_file: z.string().optional().describe('Exact destination file path (written even if it exists).'),
-        dest_dir: z.string().optional().describe('Destination directory; the captured file name is kept.'),
-        timeout_ms: z.number().int().min(1000).max(120000).optional().describe('How long to wait for a download after clicking the trigger (default 30000).'),
-        limit: z.number().int().min(1).max(200).optional().describe('For action:"list": max files (default 20).'),
+        index: z.number().int().min(1).max(200).optional().describe('1-based index from list (newest first).'),
+        dest_file: z.string().optional().describe('Exact destination path (overwrites).'),
+        dest_dir: z.string().optional().describe('Destination directory; keeps the captured name.'),
+        timeout_ms: z.number().int().min(1000).max(120000).optional().describe('Wait for the download after the trigger (default 30000).'),
+        limit: z.number().int().min(1).max(200).optional().describe('For list: max files (default 20).'),
         format: formatParam
       }
     },

@@ -1,6 +1,6 @@
 {
-  "toolCount": 15,
-  "totalBytes": 12216,
+  "toolCount": 17,
+  "totalBytes": 13847,
   "tools": [
     {
       "name": "choose",
@@ -42,7 +42,17 @@
         "trigger"
       ],
       "descBytes": 191,
-      "schemaBytes": 1261
+      "schemaBytes": 1166
+    },
+    {
+      "name": "engine",
+      "params": [
+        "game_id",
+        "include",
+        "paths"
+      ],
+      "descBytes": 235,
+      "schemaBytes": 524
     },
     {
       "name": "find_ui",
@@ -57,7 +67,7 @@
         "text"
       ],
       "descBytes": 211,
-      "schemaBytes": 920
+      "schemaBytes": 829
     },
     {
       "name": "get_logs",
@@ -123,10 +133,11 @@
         "inputs_offset",
         "max_text_chars",
         "since_last",
+        "variables",
         "wait_ms"
       ],
       "descBytes": 180,
-      "schemaBytes": 1146
+      "schemaBytes": 1192
     },
     {
       "name": "open_game",
@@ -139,6 +150,18 @@
       ],
       "descBytes": 183,
       "schemaBytes": 649
+    },
+    {
+      "name": "play",
+      "params": [
+        "format",
+        "game_id",
+        "max_steps",
+        "steps",
+        "until"
+      ],
+      "descBytes": 281,
+      "schemaBytes": 721
     },
     {
       "name": "screenshot",

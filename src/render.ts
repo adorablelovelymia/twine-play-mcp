@@ -2,12 +2,57 @@ import type { GameSession, Observation } from './session.js';
 
 const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
 
+/**
+ * FNV-1a over the rendered parts of an observation.
+ *
+ * Used to answer one question cheaply: "would re-rendering this passage produce the same
+ * text, status and sidebar as last time?" Twine re-renders PassageHeader / PassageFooter /
+ * StoryCaption on every passage, so a hub-and-spoke story repeats 15-30 KB of markup per
+ * step; a fingerprint lets the renderer collapse that to a one-line handle.
+ */
+function fingerprint(parts: Array<string | null | undefined>): string {
+  let h = 0x811c9dc5;
+  for (const part of parts) {
+    const s = part ?? '';
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    h ^= 0x1f;
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
+/** What a session remembers about the last full render of one passage. */
+export interface PassageDigestEntry {
+  fingerprint: string;
+  step: number;
+}
+
 export interface RenderOptions {
   step?: number;
   consoleCount?: number;
   sinceLast?: boolean;
   previous?: Observation | null;
+  /** Per-session passage cache: an identical re-render collapses to a one-line handle. */
+  digest?: Map<string, PassageDigestEntry>;
+  /** 'diff' (default) prints only what changed; 'full' prints the whole variable tree. */
+  variablesMode?: 'diff' | 'full';
+  /**
+   * The last variable tree the session read, for diffing.
+   *
+   * Separate from previous, because action results are lean: diffing a variables-carrying
+   * observation against a lean one has no baseline, which silently turned every "diff"
+   * into a full dump.
+   */
+  previousVariables?: unknown;
+  /** Escape hatch: force the passage text out even when it is a cacheable repeat. */
+  forceFullText?: boolean;
 }
+
+const uiKey = (o: Observation) =>
+  JSON.stringify((o.ui ?? []).map((u) => u.label ?? null));
 
 /** Compare two observations for "nothing the agent could act on has changed". */
 function isUnchanged(previous: Observation, obs: Observation): boolean {
@@ -23,34 +68,134 @@ function isUnchanged(previous: Observation, obs: Observation): boolean {
   if (byLabel(previous, 'ui') !== byLabel(obs, 'ui')) return false;
   const dialogButtons = (o: Observation) => JSON.stringify(o.dialog?.buttons?.map((b) => b.label) ?? []);
   if (dialogButtons(previous) !== dialogButtons(obs)) return false;
-  // Variables: compare unless the blob is huge (a big tree costs more than the token saving).
-  const varKey = (o: Observation) => {
-    if (o.variables === null || o.variables === undefined) return 'null';
-    let json: string;
-    try {
-      json = JSON.stringify(o.variables);
-    } catch {
-      return 'unserializable';
-    }
-    return json.length > 4000 ? `big:${json.length}` : json;
-  };
-  if (varKey(previous) !== varKey(obs)) return false;
+  // Variables only count when BOTH observations actually carry them. Comparing against a
+  // lean observation (include_variables:false) used to report a change on every toggle.
+  if (previous.variables != null && obs.variables != null) {
+    const varKey = (o: Observation) => {
+      try {
+        const json = JSON.stringify(o.variables);
+        return json.length > 4000 ? `big:${json.length}` : json;
+      } catch {
+        return 'unserializable';
+      }
+    };
+    if (varKey(previous) !== varKey(obs)) return false;
+  }
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Variables: print the delta, not the tree
+// ---------------------------------------------------------------------------
+
+/** Flatten a variable tree to dot paths so diffs are per-key, not per-blob. */
+function flatten(value: unknown, prefix = '', out: Record<string, unknown> = {}): Record<string, unknown> {
+  if (value === null || typeof value !== 'object') {
+    out[prefix] = value;
+    return out;
+  }
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj);
+  if (!keys.length && prefix) {
+    out[prefix] = Array.isArray(value) ? [] : {};
+    return out;
+  }
+  for (const k of keys) flatten(obj[k], prefix ? `${prefix}.${k}` : k, out);
+  return out;
+}
+
+const shortValue = (v: unknown): string => {
+  let json: string;
+  try {
+    json = JSON.stringify(v) ?? 'null';
+  } catch {
+    return '(unserializable)';
+  }
+  return json.length > 60 ? `${json.slice(0, 60)}…` : json;
+};
+
+/**
+ * SugarCube games routinely carry hundreds of variables (The Hundredth Floor: 302). Dumping
+ * them costs ~7.6 KB per step while a typical step changes one key — a 18-byte diff. Printing
+ * the delta is both cheaper AND more informative than the old truncated dump, which buried
+ * the one key that actually moved past the 2000-char cut.
+ */
+function renderVariables(
+  obs: Observation,
+  baseline: unknown,
+  mode: 'diff' | 'full'
+): string | null {
+  if (obs.variables == null) return null;
+  const current = flatten(obs.variables);
+  const keys = Object.keys(current);
+
+  if (mode === 'full' || baseline == null) {
+    let json: string;
+    try {
+      json = JSON.stringify(obs.variables);
+    } catch {
+      return 'Variables: (unserializable)';
+    }
+    if (!json || json === '{}' || json === 'null') return null;
+    const capped =
+      json.length > 2000
+        ? `${json.slice(0, 2000)} … [${json.length} chars total — use engine(paths:[...]) or observe(variables:"full") for the rest]`
+        : json;
+    return `Variables: ${capped}`;
+  }
+
+  const prev = flatten(baseline);
+  const changed: string[] = [];
+  for (const k of keys) {
+    const next = JSON.stringify(current[k]);
+    if (JSON.stringify(prev[k]) !== next) changed.push(`${k}: ${shortValue(prev[k])} -> ${shortValue(current[k])}`);
+  }
+  for (const k of Object.keys(prev)) {
+    if (!(k in current)) changed.push(`${k}: ${shortValue(prev[k])} -> (removed)`);
+  }
+
+  if (!changed.length) return `Variables: unchanged (${keys.length} keys)`;
+  const body = changed.length > 40 ? `${changed.slice(0, 40).join(', ')} … +${changed.length - 40} more` : changed.join(', ');
+  return `Variables Δ (${changed.length}): ${body}`;
+}
+
+// ---------------------------------------------------------------------------
+// Observation rendering
+// ---------------------------------------------------------------------------
+
 export function renderObservation(obs: Observation, opts: RenderOptions = {}): string {
   const lines: string[] = [];
+  const previous = opts.previous ?? null;
+  const step = opts.step ?? 0;
 
+  // The format/version is a per-session constant; repeating it on every step is pure noise.
+  const formatBit =
+    previous && previous.format === obs.format && previous.formatVersion === obs.formatVersion
+      ? null
+      : obs.format + (obs.formatVersion ? ` ${obs.formatVersion}` : '');
   const headerBits = [
-    obs.format + (obs.formatVersion ? ` ${obs.formatVersion}` : ''),
-    `step ${opts.step ?? 0}`,
+    formatBit,
+    `step ${step}`,
     obs.engineState ? `engine=${obs.engineState}` : null,
     `passage: ${obs.passage ?? '?'}`
   ].filter(Boolean);
   lines.push(`[${headerBits.join(' · ')}]`);
 
-  const unchanged = !!opts.sinceLast && !!opts.previous && isUnchanged(opts.previous, obs);
-  if (unchanged) {
+  // Passage cache: the passage body and sidebar are byte-identical to a previous render, so
+  // print a handle instead of the text. Choices still print in full — they are the part the
+  // agent has to act on, and they are small next to the prose.
+  //
+  // Only collapse when the caller asked for a delta view (since_last). An explicit
+  // observe(since_last:false) is a request for the passage itself, and answering it with a
+  // handle would leave the agent holding no text at all.
+  const bodyFp = fingerprint([obs.text, obs.status, uiKey(obs)]);
+  const cached = obs.passage ? opts.digest?.get(obs.passage) : undefined;
+  const cacheHit = !opts.forceFullText && !!opts.sinceLast && !!cached && cached.fingerprint === bodyFp;
+  const unchanged = !!opts.sinceLast && !!previous && isUnchanged(previous, obs);
+
+  if (cacheHit) {
+    lines.push(`(text unchanged since step ${cached!.step} — cached)`);
+  } else if (unchanged) {
     lines.push('(no change since last observation)');
   } else {
     lines.push('');
@@ -74,12 +219,15 @@ export function renderObservation(obs: Observation, opts: RenderOptions = {}): s
     lines.push(`Choices (${obs.choices.length}):`);
     obs.choices.forEach((c, i) => {
       const bits = [`${i + 1}. ${oneLine(c.label)}`];
-      if (c.target) bits.push(`-> ${c.target}`);
+      // "1. Links -> Links" says the same thing twice; only show a target that adds information.
+      if (c.target && oneLine(c.target) !== oneLine(c.label)) bits.push(`-> ${c.target}`);
       if (c.dialog) bits.push('[dialog]');
       if (c.external) bits.push('[external]');
       if (c.disabled) bits.push('(disabled)');
       lines.push('  ' + bits.join(' '));
     });
+  } else if (obs.loading) {
+    lines.push('Choices (0): still loading — call observe again; this is not an ending.');
   } else {
     lines.push('Choices (0): no visible choices.');
     if (obs.inputs.length) lines.push('  -> fill the inputs and/or press a key, then observe again.');
@@ -89,11 +237,17 @@ export function renderObservation(obs: Observation, opts: RenderOptions = {}): s
   if (obs.ui?.length) {
     const total = obs.uiTotal ?? obs.ui.length;
     lines.push('');
-    lines.push(
-      'UI: ' +
-        obs.ui.map((u) => `${oneLine(u.label)} [${u.ref}]`).join(' · ') +
-        (total > obs.ui.length ? ` · … +${total - obs.ui.length} more (inspect_ui '#ui-bar')` : '')
-    );
+    if (previous && uiKey(previous) === uiKey(obs) && !cacheHit) {
+      lines.push(`UI: unchanged (${total} control${total === 1 ? '' : 's'})`);
+    } else if (cacheHit) {
+      lines.push(`UI: unchanged (${total} control${total === 1 ? '' : 's'})`);
+    } else {
+      lines.push(
+        'UI: ' +
+          obs.ui.map((u) => `${oneLine(u.label)} [${u.ref}]`).join(' · ') +
+          (total > obs.ui.length ? ` · … +${total - obs.ui.length} more (find_ui(selector:'#ui-bar'))` : '')
+      );
+    }
   }
 
   if (obs.inputs.length) {
@@ -122,27 +276,31 @@ export function renderObservation(obs: Observation, opts: RenderOptions = {}): s
 
   if (obs.status) {
     lines.push('');
-    lines.push('Status:');
-    lines.push(obs.status);
+    if (previous && (previous.status ?? '') === obs.status) {
+      lines.push('Status: unchanged');
+    } else {
+      lines.push('Status:');
+      lines.push(obs.status);
+    }
   }
 
-  if (obs.variables && typeof obs.variables === 'object') {
-    let json: string;
-    try {
-      json = JSON.stringify(obs.variables);
-    } catch {
-      json = '(unserializable)';
-    }
-    if (json && json !== '{}' && json !== 'null') {
-      const capped = json.length > 2000 ? json.slice(0, 2000) + ` … [${json.length} chars total]` : json;
-      lines.push('');
-      lines.push('Variables: ' + capped);
-    }
+  // Prefer the session's stored baseline: the last observation may be a lean action result
+  // with no variables at all, and the caller's own tree is the better diff target.
+  const baseline = opts.previousVariables ?? previous?.variables ?? null;
+  const variables = renderVariables(obs, baseline, opts.variablesMode ?? 'diff');
+  if (variables) {
+    lines.push('');
+    lines.push(variables);
   }
 
   if (opts.consoleCount) {
     lines.push('');
     lines.push(`⚠ ${opts.consoleCount} console/network issue(s) captured — call get_logs(kind:"console") for details.`);
+  }
+
+  // Remember what a full render of this passage looked like, so a revisit can be a handle.
+  if (opts.digest && obs.passage && !cacheHit) {
+    opts.digest.set(obs.passage, { fingerprint: bodyFp, step });
   }
 
   return lines.join('\n');

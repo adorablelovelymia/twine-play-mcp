@@ -117,6 +117,7 @@ live_view({})                  # 把一个能实时观看真实页面的 URL 交
 | `click_ui` | 按 ref、CSS 选择器或可见文本点击侧边栏按钮与菜单。 |
 | `interact` | 按 ref 填写输入框／下拉框／复选框，或按键。 |
 | `navigate` | `back` 回退一段、`restart` 重新开始，或 `goto` 直达指定段落。 |
+| `play` | 一次调用执行多步：只返回紧凑日志 + 最后一次观测，省掉每步的全量观测。写法：`3`、`"标签"`、`wait 800`、`back`、`goto Hall`、`click SAVES`、`fill i1 = hi`、`# 注释`。遇错即停。 |
 
 **查看**
 
@@ -124,6 +125,7 @@ live_view({})                  # 把一个能实时观看真实页面的 URL 交
 | --- | --- |
 | `find_ui` | 按文本或 input name 查找控件；也可检查某个 DOM 子树或发现浮层面板。 |
 | `get_variables` | 按点路径读取 SugarCube `State.variables`，或只看顶层键摘要。 |
+| `engine` | 直接问引擎：段落、回合数、变量数、已访问段落，或指定变量路径 —— 约 160 字节，而一次观测约 1.5 KB。支持 SugarCube／Chapbook／Snowman。 |
 | `get_logs` | 控制台报错／HTTP 失败，以及游玩日志。 |
 | `screenshot` | 视口 PNG —— 用于 canvas 游戏与视觉检查。 |
 | `live_view` | 让用户在浏览器里实时观看真实页面（约每秒一帧）。 |
@@ -158,7 +160,7 @@ live_view({})                  # 把一个能实时观看真实页面的 URL 交
 | 格式 | 识别 | 文本／选项 | `get_variables` | 段落名 | `navigate(back)` | `snapshot` |
 | --- | --- | --- | --- | --- | --- | --- |
 | **SugarCube 2.21+** | ✅ | ✅ | ✅ `State.variables` | ✅ | ✅ `Engine.backward` | ✅ `Save.base64` / `Save.deserialize`（遵循 `Config.saves.isAllowed`） |
-| **Harlowe 3** | ✅ | ✅ | —（引擎内部不公开） | ✅ `Saved Session` 轨迹 | ✅ 侧边栏撤销 | — |
+| **Harlowe 3** | ✅ | ✅ | ✅ `Saved Session` 轨迹（仅首段之后） | ✅ `Saved Session` 轨迹 | ✅ 侧边栏撤销 | — |
 | **Snowman 2** | ✅ | ✅ | —（改用 `observe(include_variables:true)`） | ✅ | — | ✅ 状态 JSON |
 | **Chapbook 1** | ✅ | ✅ | —（改用 `observe(include_variables:true)`） | ✅ `trail` | — | ✅ `restoreFromObject` |
 | **未知 HTML** | 通用 | ✅ DOM 启发式 | — | — | — | — |
@@ -169,6 +171,24 @@ live_view({})                  # 把一个能实时观看真实页面的 URL 交
 `observe` 同样能读到 Snowman（`story.state`）与 Chapbook（`engine.state`）的变量，只有
 `get_variables` 的点路径查询是 SugarCube 专属。一切都会优雅降级：未知格式仍可走通用 DOM 路径
 游玩，格式专属的工具会返回 `unsupported` 而不是直接失败。
+
+`engine` 直接向故事引擎取状态 —— 段落、回合数、变量数、已访问段落、指定变量路径 —— 支持
+SugarCube／Chapbook／Snowman。Harlowe 把引擎藏在模块作用域里，因此明确返回 `unsupported`；
+它仍可用 `observe(include_variables:true)` 读会话轨迹。
+
+## Token 经济
+
+工具**说了什么**比工具本身贵得多，所以输出和工具面一样有预算（`npm run economy`）：
+
+- **故事变量改为按需索取。** 动作结果不再附带变量，需要时用 `observe(include_variables:true)`。
+  在 302 个变量的游戏里，这部分曾占一次点击的 43%。
+- **变量按差异输出。** `Variables Δ (1): coins: 7 -> 12` 取代整棵树 —— 这也意味着真正变化的那个
+  键不会再被 2000 字符截断埋掉。
+- **回访段落只给句柄。** Twine 每个段落都会重渲染 PassageHeader/Footer，所以回到看过的段落时只输出
+  `(text unchanged since step 3 — cached)`。
+- **未变化的状态栏与侧边栏折叠**为 `Status: unchanged` / `UI: unchanged (6 controls)`。
+- **`engine` 用约 160 字节回答**，而一次完整观测约 1.5 KB。
+- **`play` 批量执行动作**，只返回一份日志加最后一次观测。
 
 ## 疑难排查
 
