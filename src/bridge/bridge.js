@@ -1283,6 +1283,17 @@
       if (S.Save && S.Save.base64 && typeof S.Save.base64.load === 'function') {
         // SugarCube v2.37+: returns a Promise and rejects while the engine is in the Init state.
         await S.Save.base64.load(String(data));
+        // Loading restores the game state but does NOT re-render the page: the engine reports the
+        // saved passage while #passages still shows the one before it, and it stays that way
+        // (verified — unchanged after 5s). Every later observation then describes the wrong
+        // passage while the engine says otherwise, which is worse than failing outright.
+        // Replaying the current passage rebuilds the DOM from the restored state.
+        try {
+          const eng = window.Engine || (S && S.Engine);
+          if (eng && typeof eng.play === 'function' && S.State && S.State.passage) {
+            eng.play(String(S.State.passage));
+          }
+        } catch (_) { /* rendering is best-effort; the state itself is already restored */ }
         return { ok: true, method: 'sugarcube-base64' };
       }
       if (S.Save && typeof S.Save.deserialize === 'function') {

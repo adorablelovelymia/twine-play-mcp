@@ -1,6 +1,6 @@
 {
   "toolCount": 17,
-  "totalBytes": 13876,
+  "totalBytes": 13938,
   "tools": [
     {
       "name": "choose",
@@ -74,10 +74,11 @@
       "name": "get_logs",
       "params": [
         "clear",
-        "game_id"
+        "game_id",
+        "kind"
       ],
-      "descBytes": 149,
-      "schemaBytes": 296
+      "descBytes": 122,
+      "schemaBytes": 385
     },
     {
       "name": "get_variables",

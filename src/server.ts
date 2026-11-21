@@ -701,10 +701,15 @@ export function buildServer(manager: SessionManager): McpServer {
     {
       title: 'Read page errors',
       description:
-        'JS exceptions, console errors and HTTP failures the page produced — the QA view of what broke. For what the agent did, use engine(include:"actions").',
+        'JS exceptions, console errors and HTTP failures this page produced. For what the agent did, use engine(include:"actions").',
       inputSchema: {
         game_id: gameIdParam,
-        clear: z.boolean().optional().describe('Empty the buffer after returning what was in it (default false).')
+        clear: z.boolean().optional().describe('Empty the buffer after returning what was in it (default false).'),
+        // Kept as a one-value enum on purpose. This tool used to accept kind:'console'|'journal'|'all',
+        // and zod strips unknown keys, so a caller still passing kind:'journal' silently got a
+        // console dump instead of the journal it asked for. Declaring the parameter with only the
+        // value that still exists makes a stale call fail loudly, the way engine(include) already does.
+        kind: z.enum(['console']).optional().describe('Only "console" exists now.')
       }
     },
     async ({ game_id, clear }) => {
