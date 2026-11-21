@@ -554,7 +554,11 @@ export function buildServer(manager: SessionManager): McpServer {
           return text(lines.join('\n'));
         }
 
-        if (!q && !name) return errorText('missing-argument', 'Provide text and/or name; or selector / discover:true for panels.');
+        // kind alone is a legitimate query: a slider or an unnamed control has no readable label
+        // to search by, and "list every input" is exactly what a caller needs then.
+        if (!q && !name && !kind) {
+          return errorText('missing-argument', 'Provide text, name or kind; or selector / discover:true for panels.');
+        }
         const res = await manager.findUi(session, { text: q, exact, kind, name, limit });
         if (!res.ok) return fromError(manager, 'find-failed', res.error ?? res.message);
         const matches = res.matches ?? [];
