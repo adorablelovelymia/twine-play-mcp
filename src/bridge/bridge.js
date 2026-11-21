@@ -1360,7 +1360,9 @@
         out.passage = S.State.passage ?? null;
         out.turns = S.State.turns ?? null;
         out.variablesCount = Object.keys(vars).length;
-        out.visitedCount = Array.isArray(S.State.passages) ? S.State.passages.length : null;
+        // Distinct passages, matching engineVisited: State.passages is a trail with repeats
+        // (Start, Links, Start, Links), so its raw length is not a count of places you have been.
+        out.visitedCount = Array.isArray(S.State.passages) ? new Set(S.State.passages.map(String)).size : null;
 
         out.engineState = S.Engine && typeof S.Engine.state === 'string' ? S.Engine.state : null;
         out.canSave = savingAllowed(S);
@@ -1402,7 +1404,19 @@
         // the current passage object lives on window.passage.
         out.passage = g.passage && g.passage.name ? String(g.passage.name) : null;
         out.variablesCount = st.state ? Object.keys(st.state).length : null;
-        out.visitedCount = Array.isArray(st.history) ? st.history.length : null;
+        // Deduped by resolved name, like engineVisited — history is a repeat-laden trail.
+        out.visitedCount = Array.isArray(st.history)
+          ? new Set(
+              st.history
+                .map((x) => {
+                  const ps = st.passages;
+                  if (!ps) return null;
+                  const hit = typeof ps.find === 'function' ? ps.find((p) => p && String(p.id) === String(x)) : null;
+                  return hit && hit.name ? String(hit.name) : null;
+                })
+                .filter(Boolean)
+            ).size
+          : null;
 
         return { ok: true, ...out };
       }
@@ -1475,21 +1489,41 @@
     return { ok: true, values, missing };
   };
 
-  /** Passages the player has actually reached — never the full list (that would spoil). */
+  /**
+   * Distinct passages the player has reached, in order of first arrival — never the full
+   * passage list (that would spoil).
+   *
+   * De-duplication is the point: engineSummary reports a distinct count, and the raw trail of
+   * a hub-and-spoke game revisits the same hub over and over (Chapbook returned 9 entries for
+   * 6 passages, so count and list disagreed and visited looked like `actions`).
+   */
+  const dedupeVisited = (list) => {
+    const seen = new Set();
+    const out = [];
+    for (const name of list) {
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      out.push(name);
+    }
+    return out;
+  };
+
   const engineVisited = () => {
     const fmt = detectFormat().name;
     const g = window;
     try {
       if (fmt === 'sugarcube') {
         const S = sugar();
-        const list = S && S.State && Array.isArray(S.State.passages) ? S.State.passages.map(String) : [];
+        const raw = S && S.State && Array.isArray(S.State.passages) ? S.State.passages.map(String) : [];
+        const list = dedupeVisited(raw);
         return { ok: true, visited: list, count: list.length };
       }
       if (fmt === 'chapbook') {
         const st = g.engine && g.engine.state;
         let trail = null;
         try { trail = st && typeof st.get === 'function' ? st.get('trail') : null; } catch (_) { /* ignore */ }
-        const list = Array.isArray(trail) ? trail.map((x) => (typeof x === 'string' ? x : x && x.passage ? String(x.passage) : null)).filter(Boolean) : [];
+        const raw = Array.isArray(trail) ? trail.map((x) => (typeof x === 'string' ? x : x && x.passage ? String(x.passage) : null)).filter(Boolean) : [];
+        const list = dedupeVisited(raw);
         return { ok: true, visited: list, count: list.length };
       }
       if (fmt === 'snowman') {
@@ -1504,14 +1538,16 @@
             : Array.isArray(ps) ? ps.find((p) => p && String(p.id) === String(id)) : null;
           return hit && hit.name ? String(hit.name) : null;
         };
-        const list = h
+        const raw = h
           .map((x) => (x && x.passage ? String(x.passage) : typeof x === 'string' ? x : byId(x)))
           .filter(Boolean);
+        const list = dedupeVisited(raw);
         return { ok: true, visited: list, count: list.length };
       }
       if (fmt === 'harlowe') {
         const trail = harloweTrail() || [];
-        const list = trail.map((x) => (typeof x === 'string' ? x : x && x.passage ? String(x.passage) : null)).filter(Boolean);
+        const raw = trail.map((x) => (typeof x === 'string' ? x : x && x.passage ? String(x.passage) : null)).filter(Boolean);
+        const list = dedupeVisited(raw);
         return { ok: true, visited: list, count: list.length };
       }
     } catch (e) {
