@@ -37,7 +37,11 @@ export const BUDGETS = {
   /** A six-step play() run: one log plus the final observation. */
   playSixSteps: 2_000,
   /** The same six steps as separate observe+choose calls — the baseline play() beats. */
-  playSixStepsManual: 9_000
+  playSixStepsManual: 9_000,
+  /** visited-passage list after a short run. */
+  engineVisited: 500,
+  /** A screenshot going to the model: capped by the JPEG fallback, whatever the page. */
+  screenshotToModel: 500_000
 } as const;
 
 interface Row {
@@ -125,6 +129,41 @@ async function main(): Promise<number> {
         bytes += textOf(await client.callTool({ name: 'choose', arguments: { choice: 1 } })).length;
       }
       return { bytes, detail: 'observe + choose per step' };
+    })
+  );
+
+  await measure('engine visited', BUDGETS.engineVisited, () =>
+    withGame(client, 'sugarcube', async () => {
+      await client.callTool({ name: 'play', arguments: { steps: [1, 1] } });
+      const res = textOf(await client.callTool({ name: 'engine', arguments: { include: 'visited' } }));
+      const named = /"[A-Za-z]/.test(res);
+      return { bytes: res.length, detail: named ? 'names, not ids' : 'ids only!' };
+    })
+  );
+
+  await measure('json carries variables', BUDGETS.observeUnchanged * 4, () =>
+    withGame(client, 'sugarcube', async () => {
+      const res = textOf(
+        await client.callTool({ name: 'observe', arguments: { format: 'json', include_variables: true } })
+      );
+      let has = false;
+      try {
+        has = 'variables' in (JSON.parse(res) as Record<string, unknown>);
+      } catch {
+        has = false;
+      }
+      return { bytes: res.length, detail: has ? 'variables present' : 'variables DROPPED' };
+    })
+  );
+
+  await measure('screenshot to model', BUDGETS.screenshotToModel, () =>
+    withGame(client, 'sugarcube', async () => {
+      const res = (await client.callTool({ name: 'screenshot', arguments: {} })) as {
+        content?: Array<{ type: string; data?: string; mimeType?: string }>;
+      };
+      const img = res.content?.find((x) => x.type === 'image');
+      const bytes = img?.data?.length ?? 0;
+      return { bytes, detail: `${img?.mimeType ?? '?'} — capped so one shot cannot flood the context` };
     })
   );
 

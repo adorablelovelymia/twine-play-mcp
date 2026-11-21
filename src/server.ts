@@ -120,10 +120,12 @@ function observationResult(
     variablesMode?: 'diff' | 'full';
     /** The variable tree to diff against — captured *before* this observation was taken. */
     previousVariables?: unknown;
+    /** How `previous` reached the agent, so "no change" is only said about a seen state. */
+    previousSource?: 'action' | 'observe';
   } = {}
 ): TextResult {
   if (opts.format === 'json') return text(jsonPayload(session, obs, opts.action));
-  const body = observationText(session, obs, opts.sinceLast ?? false, opts.previous ?? null, opts.variablesMode ?? 'diff', opts.previousVariables);
+  const body = observationText(session, obs, opts.sinceLast ?? false, opts.previous ?? null, opts.variablesMode ?? 'diff', opts.previousVariables, opts.previousSource);
   return text((opts.prefix ? opts.prefix + '\n\n' : '') + body);
 }
 
@@ -153,7 +155,8 @@ function observationText(
   sinceLast: boolean,
   previous: Observation | null,
   variablesMode: 'diff' | 'full' = 'diff',
-  previousVariables?: unknown
+  previousVariables?: unknown,
+  previousSource?: 'action' | 'observe'
 ): string {
   return renderObservation(obs, {
     step: session.step,
@@ -165,6 +168,7 @@ function observationText(
     // Diff against the last tree this session read *before* this observation, not against
     // a lean action result and not against itself.
     previousVariables,
+    previousSource,
     forceFullText: !sinceLast
   });
 }
@@ -242,6 +246,7 @@ export function buildServer(manager: SessionManager): McpServer {
       try {
         const session = manager.resolve(game_id);
         const previous = session.lastObservation;
+        const previousSource = session.lastObservationSource;
         if (for_text !== undefined || wait_ms !== undefined) {
           const res = await manager.wait(session, { ms: wait_ms, forText: for_text, timeoutMs: wait_ms });
           const note = for_text
@@ -264,6 +269,7 @@ export function buildServer(manager: SessionManager): McpServer {
           format,
           sinceLast: since_last ?? true,
           previous,
+          previousSource,
           variablesMode: variables ?? 'diff',
           previousVariables
         });

@@ -122,6 +122,16 @@ export interface GameSession {
   /** Passage name -> fingerprint of the last full render, so a revisit can be a one-line handle. */
   digests: Map<string, { fingerprint: string; step: number }>;
   /**
+   * How lastObservation was produced.
+   *
+   * 'action' means a tool call moved the story and rendered the result inline — the caller has
+   * that text in the very message it just received. 'observe' means the agent asked to look.
+   * The renderer uses this to decide whether "nothing changed" is honest: it is only honest
+   * about a state the agent has already been shown. A step or sequence counter cannot express
+   * this, because choose() bumps the step while producing its own observation.
+   */
+  lastObservationSource: 'action' | 'observe';
+  /**
    * The last variable tree actually read, for diffing.
    *
    * Kept apart from lastObservation on purpose: action results are lean (no variables), so
@@ -320,6 +330,7 @@ export class SessionManager {
       console: [],
       downloads: [],
       lastObservation: null,
+      lastObservationSource: 'observe',
       digests: new Map(),
       lastVariables: null,
       snapshots: new Map(),
@@ -454,12 +465,16 @@ export class SessionManager {
     }
     if (obs.variables != null) session.lastVariables = obs.variables;
     session.lastObservation = obs;
+    session.lastObservationSource = 'observe';
     return obs;
   }
 
   /** An observation for an action result: lean by default, since the action is the news. */
-  private resultObservation(session: GameSession, opts: { includeVariables?: boolean } = {}): Promise<Observation> {
-    return this.observe(session, { includeVariables: opts.includeVariables ?? false });
+  private async resultObservation(session: GameSession, opts: { includeVariables?: boolean } = {}): Promise<Observation> {
+    const obs = await this.observe(session, { includeVariables: opts.includeVariables ?? false });
+    // Mark it: the caller received this text as part of the action's own reply.
+    session.lastObservationSource = 'action';
+    return obs;
   }
 
   /**

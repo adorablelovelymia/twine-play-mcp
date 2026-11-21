@@ -49,6 +49,21 @@ export interface RenderOptions {
   previousVariables?: unknown;
   /** Escape hatch: force the passage text out even when it is a cacheable repeat. */
   forceFullText?: boolean;
+  /**
+   * Step whose observation `previous` came from.
+   *
+   * "Nothing changed" is only true if the agent already saw this exact state. An action
+   * result also updates lastObservation, so without this the first observe after a click
+   * reported no change for text the caller had never been shown.
+   */
+  /**
+   * How the previous observation reached the agent.
+   *
+   * 'action' means its text was already delivered inside the last tool result, so an observe
+   * that finds the same state would have nothing new to say — but a passage it has NOT seen
+   * must still be printed in full.
+   */
+  previousSource?: 'action' | 'observe';
 }
 
 const uiKey = (o: Observation) =>
@@ -190,12 +205,27 @@ export function renderObservation(obs: Observation, opts: RenderOptions = {}): s
   // handle would leave the agent holding no text at all.
   const bodyFp = fingerprint([obs.text, obs.status, uiKey(obs)]);
   const cached = obs.passage ? opts.digest?.get(obs.passage) : undefined;
-  const cacheHit = !opts.forceFullText && !!opts.sinceLast && !!cached && cached.fingerprint === bodyFp;
-  const unchanged = !!opts.sinceLast && !!previous && isUnchanged(previous, obs);
+  // A handle only helps on a genuine *revisit* — a passage last rendered on an earlier step.
+  // When the digest was written by the step we are on (the action that just ran rendered this
+  // passage), the caller has not seen it yet and collapsing would hand back no text at all.
+  const isRevisit = !!cached && cached.step < step;
+  const cacheHit = !opts.forceFullText && !!opts.sinceLast && isRevisit && cached!.fingerprint === bodyFp;
+  // Only claim "nothing changed" when the previous observation was taken at this same
+  // step: a later step means an action moved the story, so this text is new to the caller.
+  // "Nothing changed" needs the caller to have already seen this state; an action result
+  // also updates lastObservation, and the text it produced is new to the caller.
+  // "Nothing changed" is only honest about a state the agent has already been shown. When the
+  // previous observation came from an action result, the caller is looking at a passage it has
+  // never seen in a plain observe, so print it.
+  const alreadySeen = opts.previousSource !== 'action';
+  const unchanged = !!opts.sinceLast && alreadySeen && !!previous && isUnchanged(previous, obs);
 
   if (cacheHit) {
-    lines.push(`(text unchanged since step ${cached!.step} — cached)`);
-  } else if (unchanged) {
+    // A handle, not a black hole: name where the text came from and show its opening, so the
+    // agent can tell two visits apart without re-reading the whole passage.
+    const opening = oneLine(obs.text).slice(0, 80);
+    lines.push(`(text unchanged since step ${cached!.step} — cached)${opening ? ` “${opening}…”` : ''}`);
+  } else if (unchanged && previous && previous.passage === obs.passage && previous.text === obs.text) {
     lines.push('(no change since last observation)');
   } else {
     lines.push('');
