@@ -567,8 +567,14 @@
       if (S.State && S.State.variables) vars = S.State.variables;
       else if (S.state && S.state.variables) vars = S.state.variables;
     }
+    // Everything else goes through readVariables(), which already knows Chapbook's
+    // engine.state and Harlowe's session trail. This tool used to hard-code the SugarCube
+    // path and answer "Story variables are not readable here (SugarCube required)" on a
+    // Harlowe page where observe(include_variables:true) was reading 21 variables at the
+    // same moment — the tool disagreeing with itself.
+    if (!vars) vars = readVariables(fmt);
     if (!vars || typeof vars !== 'object') {
-      return { ok: false, error: 'unsupported', message: 'Story variables are not readable here (SugarCube required).' };
+      return { ok: false, error: 'unsupported', message: 'Story variables are not readable here.' };
     }
     const paths = Array.isArray(o.paths) ? o.paths.map(String).filter(Boolean).slice(0, 50) : [];
     if (!paths.length) {
@@ -1069,8 +1075,10 @@
       if (buttons.length >= 60 || !isElementVisible(b)) continue;
       const label = normalize(b.innerText || b.value || b.getAttribute('aria-label') || b.title || '').slice(0, 80);
       if (!label) continue;
-      const ref = nextRef('x');
-      b.setAttribute('data-twmcp-ref', ref);
+      // ensureRef, not nextRef: re-inspecting the same panel used to hand every element a
+      // brand-new ref, silently invalidating refs the caller was still holding. find_ui's text
+      // path has always reused existing refs, so the two disagreed.
+      const ref = ensureRef(b, 'x');
       buttons.push({ ref, label, kind: b.tagName.toLowerCase() + (b.getAttribute('type') ? ':' + b.getAttribute('type') : '') });
     }
     const inputs = [];
@@ -1079,8 +1087,7 @@
       const t = (i.getAttribute('type') || '').toLowerCase();
       if (t === 'hidden') continue;
       if (t !== 'file' && !isElementVisible(i)) continue;
-      const ref = nextRef('x');
-      i.setAttribute('data-twmcp-ref', ref);
+      const ref = ensureRef(i, 'x');
       const d = describeInput(i, ref);
       if (t === 'file') d.kind = 'file';
       inputs.push(d);
