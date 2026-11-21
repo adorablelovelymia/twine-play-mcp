@@ -1346,7 +1346,10 @@
         let trail = null;
         try { trail = e.state.get('trail'); } catch (_) { /* ignore */ }
         out.passage = Array.isArray(trail) && trail.length ? String(trail[trail.length - 1]) : null;
-        out.visitedCount = Array.isArray(trail) ? trail.length : null;
+        // Distinct passages, not the raw trail: Chapbook's trail records repeats, so its length
+        // was not comparable with SugarCube's de-duplicated State.passages.
+        out.visitedCount = Array.isArray(trail) ? new Set(trail.map(String)).size : null;
+        out.trailLength = Array.isArray(trail) ? trail.length : null;
         out.variablesCount = (() => {
           try {
             const names = typeof e.state.varNames === 'function' ? e.state.varNames() : [];
@@ -1373,7 +1376,6 @@
         out.passage = g.passage && g.passage.name ? String(g.passage.name) : null;
         out.variablesCount = st.state ? Object.keys(st.state).length : null;
         out.visitedCount = Array.isArray(st.history) ? st.history.length : null;
-        out.historyTurns = Array.isArray(st.history) ? st.history.length : null;
         out.storyPassages = st.passages ? Object.keys(st.passages).length : null;
         return { ok: true, ...out };
       }
@@ -1382,6 +1384,11 @@
         const entry = harloweTrailEntry();
         out.passage = harloweTrailPassage();
         out.trailLength = trail.length;
+        out.visitedCount = new Set(
+          trail
+            .map((x) => (typeof x === 'string' ? x : x && x.passage ? String(x.passage) : null))
+            .filter(Boolean)
+        ).size;
         out.variablesCount = entry && entry.variables ? Object.keys(entry.variables).length : 0;
         return { ok: true, ...out, note: 'Harlowe exposes no engine globals; values come from its session trail.' };
       }

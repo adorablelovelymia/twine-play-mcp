@@ -1293,6 +1293,19 @@ export class SessionManager {
   }> {
     const limit = Math.min(Math.max(opts.maxSteps ?? 20, 1), 100);
     const queue = steps.slice(0, limit);
+
+    // Honor until against what is already on screen. Waiting until after the first step ran
+    // was surprising: a caller that asked to stop at text it could already see got a step taken.
+    const alreadyThere = session.lastObservation?.text ?? '';
+    if (opts.until && alreadyThere.includes(opts.until)) {
+      return {
+        ok: true,
+        ran: 0,
+        stoppedBy: `until already matched "${opts.until}"`,
+        log: ['#0 stopped: the target text is already on the page'],
+        observation: session.lastObservation ?? (await this.resultObservation(session))
+      };
+    }
     const log: string[] = [];
     let ran = 0;
     let stoppedBy: string | undefined;
