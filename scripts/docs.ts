@@ -56,10 +56,10 @@ const DOC: ToolDoc[] = [
       find_ui: ['Find controls by text or input name; inspect a DOM subtree or discover overlay panels.', '按文本或 input name 查找控件；也可检查某个 DOM 子树或发现浮层面板。'],
       get_variables: ['Read SugarCube `State.variables` by dot path, or a shallow key summary.', '按点路径读取 SugarCube `State.variables`，或只看顶层键摘要。'],
       engine: [
-        'Ask the story engine directly: passage, turns, variable count, visited passages, or named variable paths — ~160 bytes where an observation costs ~1.5 KB. SugarCube / Chapbook / Snowman.',
-        '直接问引擎：段落、回合数、变量数、已访问段落，或指定变量路径 —— 约 160 字节，而一次观测约 1.5 KB。支持 SugarCube／Chapbook／Snowman。'
+        'Ask the story engine directly: passage, turns, variable count, passage total, visited passages, named variable paths, or what this session did — ~160 bytes where an observation costs ~1.5 KB.',
+        '直接问引擎：段落、回合数、变量数、段落总数、已访问段落、指定变量路径，或本会话做过的动作 —— 约 160 字节，而一次观测约 1.5 KB。'
       ],
-      get_logs: ['Console errors/HTTP failures and the play journal.', '控制台报错／HTTP 失败，以及游玩日志。'],
+      get_logs: ['JS exceptions, console errors and HTTP failures the page produced.', '页面产生的 JS 异常、控制台报错与 HTTP 失败。'],
       screenshot: ['PNG of the viewport — canvas games and visual QA.', '视口 PNG —— 用于 canvas 游戏与视觉检查。'],
       live_view: ['Let the user watch the real page in their browser (~1 fps).', '让用户在浏览器里实时观看真实页面（约每秒一帧）。']
     }

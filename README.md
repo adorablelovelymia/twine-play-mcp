@@ -100,8 +100,9 @@ open you must pass it, and the error lists the candidates.
 ## Tools
 
 The surface is deliberately small: related verbs live together rather than each getting a
-tool (`navigate` covers back/restart/goto, `snapshot` covers save/load/list, `get_logs` covers
-console + journal). Types with one knob fold into `action:` / `kind:` parameters.
+tool (`navigate` covers back/restart/goto, `snapshot` covers save/load/list). Types with one
+knob fold into `action:` / `kind:` parameters. Each tool owns one source of truth: `get_logs`
+reports what the page complained about, `engine` reports what the game and the session did.
 
 <!-- tools:begin -->
 **Open & read**
@@ -128,8 +129,8 @@ console + journal). Types with one knob fold into `action:` / `kind:` parameters
 | --- | --- |
 | `find_ui` | Find controls by text or input name; inspect a DOM subtree or discover overlay panels. |
 | `get_variables` | Read SugarCube `State.variables` by dot path, or a shallow key summary. |
-| `engine` | Ask the story engine directly: passage, turns, variable count, visited passages, or named variable paths — ~160 bytes where an observation costs ~1.5 KB. SugarCube / Chapbook / Snowman. |
-| `get_logs` | Console errors/HTTP failures and the play journal. |
+| `engine` | Ask the story engine directly: passage, turns, variable count, passage total, visited passages, named variable paths, or what this session did — ~160 bytes where an observation costs ~1.5 KB. |
+| `get_logs` | JS exceptions, console errors and HTTP failures the page produced. |
 | `screenshot` | PNG of the viewport — canvas games and visual QA. |
 | `live_view` | Let the user watch the real page in their browser (~1 fps). |
 
@@ -177,10 +178,15 @@ check, never a stream. The server ships this policy in its MCP `instructions` fi
 format still plays through the generic DOM path, and format-specific tools report `unsupported`
 instead of failing.
 
-`engine` reads state straight from the story engine — passage, turns, variable count, visited
-passages, named variable paths — for SugarCube, Chapbook and Snowman. Harlowe keeps its engine in
-module scope and reports `unsupported` there; `observe(include_variables:true)` still reads its
-session trail.
+`engine` reads state straight from the story engine — passage, turns, variable count, passage
+total, visited passages, named variable paths — for SugarCube, Chapbook and Snowman. Harlowe keeps
+its engine in module scope and reports `unsupported` there; `observe(include_variables:true)` still
+reads its session trail.
+
+`engine(include:"actions")` is the exception: it reports what *this session* did (choices taken,
+snapshots loaded, passages jumped to), not what the game says. It lives here rather than in
+`get_logs` because those are two unrelated questions — "what did the page complain about" and
+"what did I just do" — and answering both in one call cost 2.5 KB.
 
 ## Token economy
 

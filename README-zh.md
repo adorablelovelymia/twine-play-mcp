@@ -97,8 +97,8 @@ live_view({})                  # 把一个能实时观看真实页面的 URL 交
 ## 工具一览
 
 工具面刻意保持很小：相关的动词合在一起，而不是各自开一个工具（`navigate` 管 back/restart/goto，
-`snapshot` 管 save/load/list，`get_logs` 管 console + journal）；只有一个开关的类型收进
-`action:` / `kind:` 参数里。
+`snapshot` 管 save/load/list）；只有一个开关的类型收进 `action:` / `kind:` 参数里。每个工具只负责
+一类真相来源：`get_logs` 报告页面报了什么错，`engine` 报告游戏和本会话做了什么。
 
 <!-- tools:begin -->
 **开局与阅读**
@@ -125,8 +125,8 @@ live_view({})                  # 把一个能实时观看真实页面的 URL 交
 | --- | --- |
 | `find_ui` | 按文本或 input name 查找控件；也可检查某个 DOM 子树或发现浮层面板。 |
 | `get_variables` | 按点路径读取 SugarCube `State.variables`，或只看顶层键摘要。 |
-| `engine` | 直接问引擎：段落、回合数、变量数、已访问段落，或指定变量路径 —— 约 160 字节，而一次观测约 1.5 KB。支持 SugarCube／Chapbook／Snowman。 |
-| `get_logs` | 控制台报错／HTTP 失败，以及游玩日志。 |
+| `engine` | 直接问引擎：段落、回合数、变量数、段落总数、已访问段落、指定变量路径，或本会话做过的动作 —— 约 160 字节，而一次观测约 1.5 KB。 |
+| `get_logs` | 页面产生的 JS 异常、控制台报错与 HTTP 失败。 |
 | `screenshot` | 视口 PNG —— 用于 canvas 游戏与视觉检查。 |
 | `live_view` | 让用户在浏览器里实时观看真实页面（约每秒一帧）。 |
 

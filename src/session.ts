@@ -1314,7 +1314,9 @@ export class SessionManager {
       const token = String(raw).trim();
       if (!token) continue;
       if (token.startsWith('#')) {
-        log.push(`#${ran + 1} (comment) ${token.replace(/^#+\s*/, '')}`);
+        // Comments do not consume a step number: reusing the next step's number made the log
+        // read as if the same step had run twice (#2 comment, then #2 "1").
+        log.push(`· ${token.replace(/^#+\s*/, '')}`);
         continue;
       }
 
@@ -1405,10 +1407,15 @@ export class SessionManager {
    * A full observation of The Hundredth Floor is ~1.5 KB of rendered text; the same facts
    * ("which passage, how many turns, 302 variables, 5 choices") are ~160 bytes through the
    * engine adapter. Formats with no reachable engine (Harlowe) report unsupported.
+   *
+   * `actions` is the odd one out: it does not come from the engine at all, it is this
+   * server's record of what the agent did. It lives here because the alternative was
+   * get_logs, which made a single tool answer two unrelated questions ("what did the page
+   * complain about" vs "what did I just do") and cost 2.5 KB per call.
    */
   async engine(
     session: GameSession,
-    opts: { include?: 'summary' | 'paths' | 'visited'; paths?: string[] } = {}
+    opts: { include?: 'summary' | 'paths' | 'visited' | 'actions'; paths?: string[]; limit?: number } = {}
   ): Promise<{ ok: boolean; error?: string; message?: string; [key: string]: unknown }> {
     const include = opts.include ?? 'summary';
     if (include === 'paths') {
@@ -1418,6 +1425,18 @@ export class SessionManager {
     }
     if (include === 'visited') {
       return this.bridge<{ ok: boolean; error?: string; message?: string }>(session, 'engineVisited');
+    }
+    if (include === 'actions') {
+      const limit = Math.min(Math.max(opts.limit ?? 20, 1), 200);
+      const shown = session.journal.slice(-limit);
+      return {
+        ok: true,
+        count: session.journal.length,
+        shown: shown.length,
+        actions: shown.map((e) =>
+          `#${e.step} ${e.passage ?? '?'} — ${e.action}${e.target ? ` -> ${e.target}` : ''}`
+        )
+      };
     }
     return this.bridge<{ ok: boolean; error?: string; message?: string }>(session, 'engineSummary');
   }
@@ -1472,6 +1491,13 @@ export class SessionManager {
     await session.context.close().catch(() => undefined);
     await session.server?.close();
     return true;
+  }
+
+  /** Close every open game; returns the ids that were closed, for the tool's reply. */
+  async closeAllSessions(): Promise<string[]> {
+    const ids = [...this.sessions.keys()];
+    for (const id of ids) await this.close(id);
+    return ids;
   }
 
   async closeAll(): Promise<void> {

@@ -1317,10 +1317,26 @@
    * This is the difference between "ask the engine one question" and "re-render the page and
    * regex the answer out of the prose".
    */
+  /**
+   * Passage count, read from the story data a compiled Twine file always carries.
+   *
+   * Each format exposes it differently, or not at all (Chapbook behind a function, Harlowe
+   * nowhere), so counting <tw-passagedata> is both simpler and universally correct.
+   */
+  const totalPassages = () => {
+    try {
+      const data = document.querySelector('tw-storydata');
+      return data ? data.querySelectorAll('tw-passagedata').length : null;
+    } catch (_) {
+      return null;
+    }
+  };
+
   const engineSummary = () => {
     const fmt = detectFormat().name;
     const g = window;
     const out = { format: fmt };
+    out.storyPassages = totalPassages();
     try {
       if (fmt === 'sugarcube') {
         const S = sugar();
@@ -1330,12 +1346,7 @@
         out.turns = S.State.turns ?? null;
         out.variablesCount = Object.keys(vars).length;
         out.visitedCount = Array.isArray(S.State.passages) ? S.State.passages.length : null;
-        // Story.passages is a Map in SugarCube 2 (not a plain object).
-        const stories = S.Story && S.Story.passages;
-        out.storyPassages =
-          stories instanceof Map ? stories.size
-            : stories && typeof stories === 'object' ? Object.keys(stories).length
-            : null;
+
         out.engineState = S.Engine && typeof S.Engine.state === 'string' ? S.Engine.state : null;
         out.canSave = savingAllowed(S);
         return { ok: true, ...out };
@@ -1350,22 +1361,23 @@
         // was not comparable with SugarCube's de-duplicated State.passages.
         out.visitedCount = Array.isArray(trail) ? new Set(trail.map(String)).size : null;
         out.trailLength = Array.isArray(trail) ? trail.length : null;
+        // varNames() returns dotted LEAF paths (config.style.page.font, ...), which is not the
+        // same thing as SugarCube's top-level key count and silently made the two incomparable.
+        // Report the top-level count as the headline and keep the leaf count under its own name.
         out.variablesCount = (() => {
+          try {
+            const names = typeof e.state.varNames === 'function' ? e.state.varNames() : [];
+            if (!Array.isArray(names)) return null;
+            return new Set(names.map((n) => String(n).split('.')[0])).size;
+          } catch (_) { return null; }
+        })();
+        out.variableLeafPaths = (() => {
           try {
             const names = typeof e.state.varNames === 'function' ? e.state.varNames() : [];
             return Array.isArray(names) ? names.length : null;
           } catch (_) { return null; }
         })();
-        // Chapbook's story.passages is a FUNCTION returning the passage list, not a map.
-        out.storyPassages = (() => {
-          try {
-            const ps = e.story && e.story.passages;
-            if (!ps) return null;
-            const list = typeof ps === 'function' ? ps() : ps;
-            if (!list) return null;
-            return Array.isArray(list) ? list.length : Object.keys(list).length;
-          } catch (_) { return null; }
-        })();
+
         return { ok: true, ...out };
       }
       if (fmt === 'snowman') {
@@ -1376,7 +1388,7 @@
         out.passage = g.passage && g.passage.name ? String(g.passage.name) : null;
         out.variablesCount = st.state ? Object.keys(st.state).length : null;
         out.visitedCount = Array.isArray(st.history) ? st.history.length : null;
-        out.storyPassages = st.passages ? Object.keys(st.passages).length : null;
+
         return { ok: true, ...out };
       }
       if (fmt === 'harlowe') {

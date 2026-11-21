@@ -49,7 +49,11 @@ export const BUDGETS = {
   /** visited-passage list after a short run. */
   engineVisited: 500,
   /** A screenshot going to the model: capped by the JPEG fallback, whatever the page. */
-  screenshotToModel: 500_000
+  screenshotToModel: 500_000,
+  /** get_logs is console-only now; it no longer drags the action journal along. */
+  getLogsConsole: 2_500,
+  /** engine(actions): what this session did, in the same compact shape as play()'s log. */
+  engineActions: 800
 } as const;
 
 interface Row {
@@ -148,6 +152,22 @@ async function main(): Promise<number> {
         bytes += textOf(await client.callTool({ name: 'choose', arguments: { choice: 1 } })).length;
       }
       return { bytes, detail: 'observe + choose per step' };
+    })
+  );
+
+  await measure('get_logs is console-only', BUDGETS.getLogsConsole, () =>
+    withGame(client, 'sugarcube', async () => {
+      const res = textOf(await client.callTool({ name: 'get_logs', arguments: {} }));
+      const leakedJournal = /Journal:|distinct passage/.test(res);
+      return { bytes: res.length, detail: leakedJournal ? 'STILL CARRIES JOURNAL' : 'console only' };
+    })
+  );
+
+  await measure('engine actions', BUDGETS.engineActions, () =>
+    withGame(client, 'sugarcube', async () => {
+      await client.callTool({ name: 'play', arguments: { steps: [1, 1, 1] } });
+      const res = textOf(await client.callTool({ name: 'engine', arguments: { include: 'actions' } }));
+      return { bytes: res.length, detail: res.slice(0, 80) };
     })
   );
 

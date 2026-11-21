@@ -1,6 +1,6 @@
 {
   "toolCount": 17,
-  "totalBytes": 13847,
+  "totalBytes": 13876,
   "tools": [
     {
       "name": "choose",
@@ -49,10 +49,11 @@
       "params": [
         "game_id",
         "include",
+        "limit",
         "paths"
       ],
       "descBytes": 235,
-      "schemaBytes": 524
+      "schemaBytes": 707
     },
     {
       "name": "find_ui",
@@ -73,12 +74,10 @@
       "name": "get_logs",
       "params": [
         "clear",
-        "game_id",
-        "kind",
-        "limit"
+        "game_id"
       ],
-      "descBytes": 142,
-      "schemaBytes": 513
+      "descBytes": 149,
+      "schemaBytes": 296
     },
     {
       "name": "get_variables",
@@ -178,8 +177,8 @@
         "action",
         "game_id"
       ],
-      "descBytes": 126,
-      "schemaBytes": 308
+      "descBytes": 159,
+      "schemaBytes": 331
     },
     {
       "name": "snapshot",

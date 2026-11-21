@@ -423,7 +423,7 @@ export function buildServer(manager: SessionManager): McpServer {
           const res = await manager.back(session);
           if (!res.ok) {
             return errResult(res.error ?? 'back-failed', res.message, {
-              hint: 'Only SugarCube (Engine.backward) and Harlowe (sidebar undo) can go back. Save a snapshot before risky branches instead.',
+              hint: 'No back control found on this page. SugarCube, Harlowe, Snowman and Chapbook all have one when the game shows it — save a snapshot before risky branches if not.',
               passage: session.lastObservation?.passage ?? null
             });
           }
@@ -440,7 +440,9 @@ export function buildServer(manager: SessionManager): McpServer {
         const res = await manager.goTo(session, target);
         if (!res.ok) {
           return errResult(res.error ?? 'goto-failed', res.message, {
-            hint: 'goto needs a story format with a jump API (SugarCube Engine.play, Snowman story.show, Harlowe Engine.goTo).',
+            // Name only the formats that actually have a jump API. The old hint listed Harlowe,
+            // which is precisely the format that cannot do it.
+            hint: 'goto works on SugarCube (Engine.play) and Snowman (story.show). Harlowe and Chapbook expose no jump API — use play() with the choices that lead there.',
             passage: session.lastObservation?.passage ?? null
           });
         }
@@ -598,7 +600,7 @@ export function buildServer(manager: SessionManager): McpServer {
         const res = await manager.getVariables(session, paths);
         if (!res.ok) {
           return errResult(res.error ?? 'variables-failed', res.message, {
-            hint: 'get_variables needs SugarCube. For Snowman/Chapbook use observe(include_variables:true) or a snapshot.'
+            hint: 'For Snowman/Chapbook use engine(include:"paths", paths:[...]) — ~60 bytes and precise. observe(include_variables:true) works too but costs a whole observation.'
           });
         }
         return text(JSON.stringify(res));
@@ -656,23 +658,26 @@ export function buildServer(manager: SessionManager): McpServer {
       inputSchema: {
         game_id: gameIdParam,
         include: z
-          .enum(['summary', 'paths', 'visited'])
+          .enum(['summary', 'paths', 'visited', 'actions'])
           .optional()
-          .describe('summary (default): passage/turns/counts. paths: read the paths you name. visited: passages reached so far.'),
+          .describe(
+            'summary (default): passage/turns/counts. paths: read the paths you name. visited: passages the engine says you reached. actions: what this session did.'
+          ),
         paths: z
           .array(z.string())
           .max(50)
           .optional()
-          .describe('With include:"paths": dot paths like "player.hp" or "coins".')
+          .describe('With include:"paths": dot paths like "player.hp" or "coins".'),
+        limit: z.number().int().min(1).max(200).optional().describe('With include:"actions": how many to return (default 20).')
       }
     },
-    async ({ game_id, include, paths }) => {
+    async ({ game_id, include, paths, limit }) => {
       try {
         const session = manager.resolve(game_id);
-        const res = await manager.engine(session, { include, paths });
+        const res = await manager.engine(session, { include, paths, limit });
         if (!res.ok) {
           return errResult(res.error ?? 'engine-failed', res.message, {
-            hint: 'Harlowe keeps its engine private. Use observe() there; observe(include_variables:true) still reads its session trail.'
+            hint: 'No readable engine on this page yet. If the game is still booting, observe() once and retry; Harlowe never exposes one — use observe(include_variables:true) there.'
           });
         }
         return text(JSON.stringify(res));
@@ -685,44 +690,24 @@ export function buildServer(manager: SessionManager): McpServer {
   server.registerTool(
     'get_logs',
     {
-      title: 'Read console errors and the play journal',
+      title: 'Read page errors',
       description:
-        'console: JS exceptions, console errors and HTTP failures from the page (QA). journal: passages visited and choices taken. all (default): both.',
+        'JS exceptions, console errors and HTTP failures the page produced — the QA view of what broke. For what the agent did, use engine(include:"actions").',
       inputSchema: {
         game_id: gameIdParam,
-        kind: z.enum(['console', 'journal', 'all']).optional().describe('Which log to read (default "all").'),
-        clear: z.boolean().optional().describe('Clear the selected log after reading (default false).'),
-        limit: z.number().int().min(1).max(500).optional().describe('Journal entries to show, last N (default 50).')
+        clear: z.boolean().optional().describe('Empty the buffer after returning what was in it (default false).')
       }
     },
-    async ({ game_id, kind, clear, limit }) => {
+    async ({ game_id, clear }) => {
       try {
         const session = manager.resolve(game_id);
-        const want = kind ?? 'all';
-        const parts: string[] = [];
-
-        if (want === 'console' || want === 'all') {
-          const body = renderConsole(session.console);
-          if (want === 'all') parts.push(`Console (${session.console.length}):\n${body}`);
-          else parts.push(body);
-          if (clear) session.console = [];
-        }
-
-        if (want === 'journal' || want === 'all') {
-          const entries = session.journal;
-          if (!entries.length) {
-            parts.push('Journal: empty (no actions taken yet).');
-          } else {
-            const shown = entries.slice(-(limit ?? 50));
-            const visited = new Set(entries.map((e) => e.passage).filter(Boolean));
-            const lines = shown.map((e) => `#${e.step} ${e.passage ?? '?'} — ${e.action}${e.target ? ` -> ${e.target}` : ''}`);
-            const header = `Journal: ${entries.length} action(s), ${visited.size} distinct passage(s) visited. Showing last ${shown.length}.`;
-            parts.push(header + '\n' + lines.join('\n'));
-          }
-          if (clear) session.journal = [];
-        }
-
-        return text(parts.join('\n\n'));
+        const entries = session.console;
+        const head = `Console (${entries.length}):`;
+        const body = entries.length ? renderConsole(entries) : 'No console errors or warnings captured.';
+        // Read what was buffered, THEN empty: clearing first meant the caller got an empty
+        // answer and the entries they wanted were already gone.
+        if (clear) session.console = [];
+        return text(entries.length ? `${head}\n${body}` : body);
       } catch (err) {
         return fromError(manager, 'logs-failed', err);
       }
@@ -932,13 +917,18 @@ export function buildServer(manager: SessionManager): McpServer {
     'session',
     {
       title: 'Manage game sessions',
-      description: 'list: the open games (id, title, format, step, source). close: shut one down, including its browser context and static server.',
+      description: 'list: the open games (id, title, format, step, source). close: shut one down, including its browser context and static server. close_all: shut every game down.',
       inputSchema: {
-        action: z.enum(['list', 'close']).describe('list open games, or close one.'),
+        action: z.enum(['list', 'close', 'close_all']).describe('list open games, close one, or close all.'),
         game_id: gameIdParam
       }
     },
     async ({ action, game_id }) => {
+      if (action === 'close_all') {
+        const ids = await manager.closeAllSessions();
+        for (const id of ids) forgetLiveView(id);
+        return text(ids.length ? `Closed ${ids.length} game(s): ${ids.join(', ')}.` : 'No open games.');
+      }
       if (action === 'list') {
         const games = manager.listSessions();
         if (!games.length) return text('No open games.');
