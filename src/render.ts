@@ -325,7 +325,7 @@ export function renderObservation(obs: Observation, opts: RenderOptions = {}): s
 
   if (opts.consoleCount) {
     lines.push('');
-    lines.push(`⚠ ${opts.consoleCount} console/network issue(s) captured — call get_logs(kind:"console") for details.`);
+    lines.push(`⚠ ${opts.consoleCount} console/network issue(s) captured — call get_logs() for details.`);
   }
 
   // Remember what a full render of this passage looked like, so a revisit can be a handle.

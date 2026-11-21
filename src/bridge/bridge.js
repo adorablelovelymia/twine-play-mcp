@@ -590,7 +590,16 @@
               : sanitize(v, 0, new Set());
         } catch (_) { summary[k] = '[unreadable]'; }
       }
-      return { ok: true, mode: 'keys', totalKeys: keys.length, keys: keys.slice(0, 200), summary };
+      // Say when the list was cut: a caller reading 200 of 302 keys with no marker could
+      // reasonably conclude the game has 200 variables.
+      return {
+        ok: true,
+        mode: 'keys',
+        totalKeys: keys.length,
+        keys: keys.slice(0, 200),
+        ...(keys.length > 200 ? { truncated: true, note: `showing 200 of ${keys.length} keys — pass paths:[...] for specific ones` } : {}),
+        summary
+      };
     }
     const values = {};
     const missing = [];
