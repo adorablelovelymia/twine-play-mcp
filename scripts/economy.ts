@@ -26,8 +26,16 @@ const fixture = (name: string) => path.join(HERE, '..', 'test', 'fixtures', 'com
  * they exist to catch a regression, not to describe today's exact output.
  */
 export const BUDGETS = {
-  /** observe() on an unchanged passage: header + "(no change)" + choices. */
+  /**
+  * observe() on an unchanged passage: header + "(no change)" + choices.
+  *
+  * This is the *only* case where the passage is omitted, and it is honest: the agent saw this
+  * exact state in the immediately preceding observation. Collapsing there is worth ~1.4 KB per
+  * redundant call; collapsing anywhere else was hiding text the agent had never been shown.
+  */
   observeUnchanged: 400,
+  /** observe() that genuinely has new text to show — the normal path, not a regression. */
+  observeWithText: 2_500,
   /** An action result (choose) carries no story variables by default. */
   actionNoVariables: 2_600,
   /** A cached revisit prints a handle instead of re-rendering the passage. */
@@ -82,6 +90,17 @@ async function main(): Promise<number> {
       await client.callTool({ name: 'observe', arguments: {} });
       const again = textOf(await client.callTool({ name: 'observe', arguments: {} }));
       return { bytes: again.length, detail: again.split('\n')[0] ?? '' };
+    })
+  );
+
+  await measure('observe shows new text', BUDGETS.observeWithText, () =>
+    withGame(client, 'sugarcube', async () => {
+      // The whole point: after an action, an observe must deliver the passage body.
+      await client.callTool({ name: 'choose', arguments: { choice: 1 } });
+      const res = textOf(await client.callTool({ name: 'observe', arguments: {} }));
+      const body = res.split('\n')[1] ?? '';
+      const collapsed = /no change|cached/.test(body);
+      return { bytes: res.length, detail: collapsed ? 'COLLAPSED — text lost!' : 'passage delivered' };
     })
   );
 
