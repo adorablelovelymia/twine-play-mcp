@@ -1361,9 +1361,18 @@ export class SessionManager {
       } else if (/^click\s+/i.test(token)) {
         const r = await this.clickUi(session, { text: token.replace(/^click\s+/i, '').trim() });
         res = { ok: r.ok, error: r.error, message: r.message, observation: r.observation };
-      } else if (/^fill\s+/i.test(token)) {
+      } else if (/^fill\b/i.test(token)) {
+        // Prefix match, not /^fill\s+/: a bare "fill" or "fill i1" used to fall through to the
+        // label branch and be reported as "no visible choice matches fill", which hides the
+        // real problem (a malformed token).
         const m = /^fill\s+(\S+)\s*=\s*([\s\S]*)$/i.exec(token);
-        if (!m) res = { ok: false, error: 'bad-step', message: `Cannot parse "${token}". Use: fill <ref> = <value>` };
+        if (!m) {
+          res = {
+            ok: false,
+            error: 'bad-step',
+            message: `Cannot parse "${token}". Use: fill <ref> = <value>`
+          };
+        }
         else {
           const r = await this.interact(session, m[1]!, m[2] ?? '');
           res = { ok: r.ok, error: r.error, message: r.message, observation: r.observation };
