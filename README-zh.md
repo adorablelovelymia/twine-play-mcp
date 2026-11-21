@@ -160,7 +160,7 @@ live_view({})                  # 把一个能实时观看真实页面的 URL 交
 | 格式 | 识别 | 文本／选项 | `get_variables` | 段落名 | `navigate(back)` | `snapshot` |
 | --- | --- | --- | --- | --- | --- | --- |
 | **SugarCube 2.21+** | ✅ | ✅ | ✅ `State.variables` | ✅ | ✅ `Engine.backward` | ✅ `Save.base64` / `Save.deserialize`（遵循 `Config.saves.isAllowed`） |
-| **Harlowe 3** | ✅ | ✅ | ✅ `Saved Session` 轨迹（仅首段之后） | ✅ `Saved Session` 轨迹 | ✅ 侧边栏撤销 | — |
+| **Harlowe 3** | ✅ | ✅ | ✅ `Saved Session` 轨迹（首段之后） | ✅ `Saved Session` 轨迹 | ✅ 侧边栏撤销（游戏显示时） | — |
 | **Snowman 2** | ✅ | ✅ | —（改用 `observe(include_variables:true)`） | ✅ | — | ✅ 状态 JSON |
 | **Chapbook 1** | ✅ | ✅ | —（改用 `observe(include_variables:true)`） | ✅ `trail` | — | ✅ `restoreFromObject` |
 | **未知 HTML** | 通用 | ✅ DOM 启发式 | — | — | — | — |

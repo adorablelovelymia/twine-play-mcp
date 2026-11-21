@@ -165,7 +165,7 @@ check, never a stream. The server ships this policy in its MCP `instructions` fi
 | Format | Detect | Text / choices | `get_variables` | Passage name | `navigate(back)` | `snapshot` |
 | --- | --- | --- | --- | --- | --- | --- |
 | **SugarCube 2.21+** | ✅ | ✅ | ✅ `State.variables` | ✅ | ✅ `Engine.backward` | ✅ `Save.base64` / `Save.deserialize` (respects `Config.saves.isAllowed`) |
-| **Harlowe 3** | ✅ | ✅ | ✅ `Saved Session` trail (first passage only) | ✅ `Saved Session` trail | ✅ sidebar undo | — |
+| **Harlowe 3** | ✅ | ✅ | ✅ `Saved Session` trail (after the first passage) | ✅ `Saved Session` trail | ✅ sidebar undo (when the game shows it) | — |
 | **Snowman 2** | ✅ | ✅ | — (use `observe(include_variables:true)`) | ✅ | — | ✅ state JSON |
 | **Chapbook 1** | ✅ | ✅ | — (use `observe(include_variables:true)`) | ✅ `trail` | — | ✅ `restoreFromObject` |
 | **Unknown HTML** | generic | ✅ DOM heuristics | — | — | — | — |
